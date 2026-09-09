@@ -23,7 +23,9 @@ The result is a software **client input receipt -> client present submission** m
 - Background noise range: approximately `0.04 .. 0.30`.
 - A fixed marker square around the exact stream center is forced to pure black or pure white, so Moonlight's single-center-pixel detector cannot be triggered by unrelated background noise.
 - XInput **A** toggles the center marker black <-> white.
+- Keyboard **Space** also toggles the center marker for local PC smoke testing.
 - XInput **B** closes the helper.
+- Keyboard **Esc** closes the helper.
 
 ## Build
 
@@ -64,9 +66,16 @@ Example:
 moonlight-latency-helper.exe --fps 120 --controller-index 0 --noise 100
 ```
 
-Press **B** on the selected XInput controller or **Esc** on the keyboard to exit.
+Controls while running:
 
-The initial center marker is black. Each rising edge of XInput **A** toggles black <-> white.
+```text
+Controller A   Toggle center marker black <-> white
+Space          Toggle center marker black <-> white (local PC smoke test)
+Controller B   Exit
+Esc            Exit
+```
+
+The initial center marker is black.
 
 ## Recommended test sequence
 
