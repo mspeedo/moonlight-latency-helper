@@ -41,7 +41,8 @@ struct ShaderParams {
 static_assert(sizeof(ShaderParams) == 32, "ShaderParams/HLSL constant-buffer mismatch");
 
 std::atomic<bool> g_Running { true };
-std::atomic<uint32_t> g_MarkerWhite { 0 }; // 0 = black, 1 = white
+std::atomic<uint32_t> g_MarkerWhite { 0 };
+HWND g_Hwnd = nullptr;
 
 const char* kShaderSource = R"HLSL(
 cbuffer Params : register(b0)
@@ -87,19 +88,20 @@ float Random01(uint seed)
 float4 PSMain(VSOut input) : SV_Target
 {
     const float2 center = float2(width, height) * 0.5;
-    const float2 distanceFromCenter = abs(input.position.xy - center);
+    const float2 d = abs(input.position.xy - center);
 
-    // Moonlight samples the decoded stream's exact center pixel. Keep a static
-    // square around that point so scaling/chroma filtering cannot mix the
-    // animated background into the detector pixel.
-    if (distanceFromCenter.x < markerHalfSize && distanceFromCenter.y < markerHalfSize) {
+    if (d.x < markerHalfSize && d.y < markerHalfSize) {
         const float marker = markerWhite != 0 ? 1.0 : 0.0;
         return float4(marker, marker, marker, 1.0);
     }
 
-    // Background remains DARK in both states. Only the center marker changes.
+    // Explicitly move the noise field every rendered frame. This guarantees
+    // temporal changes in addition to the per-frame hash salt.
     const uint2 pixel = uint2(input.position.xy);
-    const uint seed = pixel.x * 73856093U ^ pixel.y * 19349663U ^ frameIndex * 83492791U;
+    const uint2 shifted = pixel + uint2(frameIndex * 37U, frameIndex * 73U);
+    const uint temporal = Hash(frameIndex * 747796405U + 2891336453U);
+    const uint seed = shifted.x * 73856093U ^ shifted.y * 19349663U ^ temporal;
+
     const float3 randomValue = float3(
         Random01(seed),
         Random01(seed ^ 0x9e3779b9U),
@@ -124,7 +126,7 @@ void PrintUsage()
         << L"  --noise <0-100>            Dark-background noise amplitude, default 100\n"
         << L"  --marker-size <pixels>     Center square size, default 32\n"
         << L"  --help                     Show this help\n\n"
-        << L"Press Esc to exit. XInput A toggles center square BLACK <-> WHITE.\n";
+        << L"A or Space toggles BLACK <-> WHITE. B or Esc exits.\n";
 }
 
 bool ParseOptions(int argc, wchar_t** argv, Options& options)
@@ -202,6 +204,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             DestroyWindow(hwnd);
             return 0;
         }
+        if (wParam == VK_SPACE && (lParam & (1LL << 30)) == 0) {
+            g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
+            return 0;
+        }
         break;
     case WM_SETCURSOR:
         SetCursor(nullptr);
@@ -250,41 +256,37 @@ class DeadlinePacer {
 public:
     DeadlinePacer(double frequencyHz, double spinSeconds)
     {
-        LARGE_INTEGER qpcFrequency {};
-        QueryPerformanceFrequency(&qpcFrequency);
-        m_QpcFrequency = qpcFrequency.QuadPart;
-        m_PeriodTicks = static_cast<double>(m_QpcFrequency) / frequencyHz;
-        m_SpinTicks = static_cast<int64_t>(static_cast<double>(m_QpcFrequency) * spinSeconds);
+        LARGE_INTEGER frequency {};
+        QueryPerformanceFrequency(&frequency);
+        m_Frequency = frequency.QuadPart;
+        m_Period = static_cast<double>(m_Frequency) / frequencyHz;
+        m_SpinTicks = static_cast<int64_t>(static_cast<double>(m_Frequency) * spinSeconds);
 
-        m_Timer = CreateWaitableTimerExW(
-            nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        m_Timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         if (!m_Timer) {
             m_Timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
         }
 
         LARGE_INTEGER now {};
         QueryPerformanceCounter(&now);
-        m_NextDeadline = static_cast<double>(now.QuadPart);
+        m_Next = static_cast<double>(now.QuadPart);
     }
 
     ~DeadlinePacer()
     {
-        if (m_Timer) {
-            CloseHandle(m_Timer);
-        }
+        if (m_Timer) CloseHandle(m_Timer);
     }
 
     void WaitNext()
     {
-        const int64_t deadline = static_cast<int64_t>(m_NextDeadline);
+        const int64_t deadline = static_cast<int64_t>(m_Next);
         WaitUntil(deadline);
 
         LARGE_INTEGER now {};
         QueryPerformanceCounter(&now);
-        m_NextDeadline += m_PeriodTicks;
-
-        if (static_cast<double>(now.QuadPart) - m_NextDeadline > m_PeriodTicks * 2.0) {
-            m_NextDeadline = static_cast<double>(now.QuadPart) + m_PeriodTicks;
+        m_Next += m_Period;
+        if (static_cast<double>(now.QuadPart) - m_Next > m_Period * 2.0) {
+            m_Next = static_cast<double>(now.QuadPart) + m_Period;
         }
     }
 
@@ -295,20 +297,15 @@ private:
             LARGE_INTEGER now {};
             QueryPerformanceCounter(&now);
             const int64_t remaining = deadline - now.QuadPart;
-            if (remaining <= 0) {
-                return;
-            }
+            if (remaining <= 0) return;
 
             if (m_Timer && remaining > m_SpinTicks) {
                 const int64_t sleepTicks = remaining - m_SpinTicks;
                 LARGE_INTEGER due {};
                 due.QuadPart = -static_cast<LONGLONG>(
                     (static_cast<long double>(sleepTicks) * 10000000.0L) /
-                    static_cast<long double>(m_QpcFrequency));
-                if (due.QuadPart == 0) {
-                    due.QuadPart = -1;
-                }
-
+                    static_cast<long double>(m_Frequency));
+                if (due.QuadPart == 0) due.QuadPart = -1;
                 if (SetWaitableTimer(m_Timer, &due, 0, nullptr, nullptr, FALSE)) {
                     WaitForSingleObject(m_Timer, INFINITE);
                     continue;
@@ -320,36 +317,42 @@ private:
     }
 
     HANDLE m_Timer = nullptr;
-    int64_t m_QpcFrequency = 0;
+    int64_t m_Frequency = 0;
     int64_t m_SpinTicks = 0;
-    double m_PeriodTicks = 0.0;
-    double m_NextDeadline = 0.0;
+    double m_Period = 0.0;
+    double m_Next = 0.0;
 };
 
 void InputThread(DWORD controllerIndex)
 {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-
-    // 1 kHz host-side polling keeps helper-added detection delay below ~1 ms
-    // without dedicating a full logical core to an unlimited busy-poll loop.
     DeadlinePacer pacer(1000.0, 0.00005);
     bool previousA = false;
+    bool previousB = false;
 
     while (g_Running.load(std::memory_order_acquire)) {
         pacer.WaitNext();
 
         XINPUT_STATE state {};
         const DWORD result = XInputGetState(controllerIndex, &state);
-        if (result == ERROR_SUCCESS) {
-            const bool currentA = (state.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
-            if (currentA && !previousA) {
-                g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
-            }
-            previousA = currentA;
-        }
-        else {
+        if (result != ERROR_SUCCESS) {
             previousA = false;
+            previousB = false;
+            continue;
         }
+
+        const bool currentA = (state.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
+        const bool currentB = (state.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
+
+        if (currentA && !previousA) {
+            g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
+        }
+        if (currentB && !previousB && g_Hwnd) {
+            PostMessageW(g_Hwnd, WM_CLOSE, 0, 0);
+        }
+
+        previousA = currentA;
+        previousB = currentB;
     }
 }
 
@@ -357,9 +360,7 @@ bool PumpMessages()
 {
     MSG message {};
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-        if (message.message == WM_QUIT) {
-            return false;
-        }
+        if (message.message == WM_QUIT) return false;
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
@@ -372,9 +373,7 @@ int wmain(int argc, wchar_t** argv)
 {
     Options options;
     if (!ParseOptions(argc, argv, options)) {
-        if (argc > 1 && (std::wstring(argv[1]) == L"--help" || std::wstring(argv[1]) == L"-h")) {
-            return 0;
-        }
+        if (argc > 1 && (std::wstring(argv[1]) == L"--help" || std::wstring(argv[1]) == L"-h")) return 0;
         PrintUsage();
         return 1;
     }
@@ -407,7 +406,7 @@ int wmain(int argc, wchar_t** argv)
         return 1;
     }
 
-    const HWND hwnd = CreateWindowExW(
+    g_Hwnd = CreateWindowExW(
         WS_EX_TOPMOST,
         windowClass.lpszClassName,
         L"Moonlight Latency Helper",
@@ -421,19 +420,17 @@ int wmain(int argc, wchar_t** argv)
         instance,
         nullptr);
 
-    if (!hwnd) {
+    if (!g_Hwnd) {
         std::cerr << "CreateWindowEx failed\n";
         return 1;
     }
 
-    ShowWindow(hwnd, SW_SHOW);
-    SetForegroundWindow(hwnd);
+    ShowWindow(g_Hwnd, SW_SHOW);
+    SetForegroundWindow(g_Hwnd);
+    SetFocus(g_Hwnd);
 
-    UINT deviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    const D3D_FEATURE_LEVEL featureLevels[] = {
-        D3D_FEATURE_LEVEL_11_1,
-        D3D_FEATURE_LEVEL_11_0,
-    };
+    const UINT deviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    const D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
 
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -444,7 +441,7 @@ int wmain(int argc, wchar_t** argv)
         nullptr,
         deviceFlags,
         featureLevels,
-        static_cast<UINT>(std::size(featureLevels)),
+        2,
         D3D11_SDK_VERSION,
         &device,
         &selectedFeatureLevel,
@@ -482,8 +479,7 @@ int wmain(int argc, wchar_t** argv)
     ComPtr<IDXGIFactory5> factory5;
     if (SUCCEEDED(factory.As(&factory5))) {
         BOOL supported = FALSE;
-        if (SUCCEEDED(factory5->CheckFeatureSupport(
-                DXGI_FEATURE_PRESENT_ALLOW_TEARING, &supported, sizeof(supported)))) {
+        if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &supported, sizeof(supported)))) {
             allowTearing = supported == TRUE;
         }
     }
@@ -501,12 +497,12 @@ int wmain(int argc, wchar_t** argv)
     swapDesc.Flags = allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
     ComPtr<IDXGISwapChain1> swapChain;
-    hr = factory->CreateSwapChainForHwnd(device.Get(), hwnd, &swapDesc, nullptr, nullptr, &swapChain);
+    hr = factory->CreateSwapChainForHwnd(device.Get(), g_Hwnd, &swapDesc, nullptr, nullptr, &swapChain);
     if (FAILED(hr)) {
         std::cerr << "CreateSwapChainForHwnd failed: 0x" << std::hex << static_cast<unsigned long>(hr) << "\n";
         return 1;
     }
-    factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+    factory->MakeWindowAssociation(g_Hwnd, DXGI_MWA_NO_ALT_ENTER);
 
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D11RenderTargetView> renderTarget;
@@ -525,10 +521,8 @@ int wmain(int argc, wchar_t** argv)
 
     ComPtr<ID3D11VertexShader> vertexShader;
     ComPtr<ID3D11PixelShader> pixelShader;
-    if (FAILED(device->CreateVertexShader(
-            vertexBytecode->GetBufferPointer(), vertexBytecode->GetBufferSize(), nullptr, &vertexShader)) ||
-        FAILED(device->CreatePixelShader(
-            pixelBytecode->GetBufferPointer(), pixelBytecode->GetBufferSize(), nullptr, &pixelShader))) {
+    if (FAILED(device->CreateVertexShader(vertexBytecode->GetBufferPointer(), vertexBytecode->GetBufferSize(), nullptr, &vertexShader)) ||
+        FAILED(device->CreatePixelShader(pixelBytecode->GetBufferPointer(), pixelBytecode->GetBufferSize(), nullptr, &pixelShader))) {
         std::cerr << "Unable to create shaders\n";
         return 1;
     }
@@ -545,12 +539,9 @@ int wmain(int argc, wchar_t** argv)
     }
 
     const D3D11_VIEWPORT viewport {
-        0.0f,
-        0.0f,
-        static_cast<float>(width),
-        static_cast<float>(height),
-        0.0f,
-        1.0f,
+        0.0f, 0.0f,
+        static_cast<float>(width), static_cast<float>(height),
+        0.0f, 1.0f,
     };
 
     context->OMSetRenderTargets(1, renderTarget.GetAddressOf(), nullptr);
@@ -567,9 +558,9 @@ int wmain(int argc, wchar_t** argv)
         << L"Render cadence: " << options.fps << L" FPS\n"
         << L"XInput controller: " << options.controllerIndex << L"\n"
         << L"Center marker: " << options.markerSize << L" px, starts BLACK\n"
-        << L"Background: dark animated noise\n"
+        << L"Background: dark dynamic noise\n"
         << L"Tearing present: " << (allowTearing ? L"yes" : L"no") << L"\n"
-        << L"Press Esc to exit.\n";
+        << L"A/Space toggle marker. B/Esc exit.\n";
 
     std::thread inputThread(InputThread, options.controllerIndex);
     DeadlinePacer framePacer(options.fps, 0.00030);
@@ -599,9 +590,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     g_Running.store(false, std::memory_order_release);
-    if (inputThread.joinable()) {
-        inputThread.join();
-    }
+    if (inputThread.joinable()) inputThread.join();
 
     SetThreadExecutionState(ES_CONTINUOUS);
     return 0;
