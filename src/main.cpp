@@ -95,8 +95,6 @@ float4 PSMain(VSOut input) : SV_Target
         return float4(marker, marker, marker, 1.0);
     }
 
-    // Explicitly move the noise field every rendered frame. This guarantees
-    // temporal changes in addition to the per-frame hash salt.
     const uint2 pixel = uint2(input.position.xy);
     const uint2 shifted = pixel + uint2(frameIndex * 37U, frameIndex * 73U);
     const uint temporal = Hash(frameIndex * 747796405U + 2891336453U);
@@ -202,10 +200,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) {
             DestroyWindow(hwnd);
-            return 0;
-        }
-        if (wParam == VK_SPACE && (lParam & (1LL << 30)) == 0) {
-            g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
             return 0;
         }
         break;
@@ -329,9 +323,24 @@ void InputThread(DWORD controllerIndex)
     DeadlinePacer pacer(1000.0, 0.00005);
     bool previousA = false;
     bool previousB = false;
+    bool previousSpace = false;
+    bool previousEscape = false;
 
     while (g_Running.load(std::memory_order_acquire)) {
         pacer.WaitNext();
+
+        const bool currentSpace = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+        const bool currentEscape = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+
+        if (currentSpace && !previousSpace) {
+            g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
+        }
+        if (currentEscape && !previousEscape && g_Hwnd) {
+            PostMessageW(g_Hwnd, WM_CLOSE, 0, 0);
+        }
+
+        previousSpace = currentSpace;
+        previousEscape = currentEscape;
 
         XINPUT_STATE state {};
         const DWORD result = XInputGetState(controllerIndex, &state);
@@ -484,13 +493,15 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    constexpr UINT kBufferCount = 2;
+
     DXGI_SWAP_CHAIN_DESC1 swapDesc {};
     swapDesc.Width = static_cast<UINT>(width);
     swapDesc.Height = static_cast<UINT>(height);
     swapDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     swapDesc.SampleDesc.Count = 1;
     swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapDesc.BufferCount = 2;
+    swapDesc.BufferCount = kBufferCount;
     swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     swapDesc.Scaling = DXGI_SCALING_STRETCH;
     swapDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
@@ -504,12 +515,20 @@ int wmain(int argc, wchar_t** argv)
     }
     factory->MakeWindowAssociation(g_Hwnd, DXGI_MWA_NO_ALT_ENTER);
 
-    ComPtr<ID3D11Texture2D> backBuffer;
-    ComPtr<ID3D11RenderTargetView> renderTarget;
-    if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer))) ||
-        FAILED(device->CreateRenderTargetView(backBuffer.Get(), nullptr, &renderTarget))) {
-        std::cerr << "Unable to create render target\n";
+    ComPtr<IDXGISwapChain3> swapChain3;
+    if (FAILED(swapChain.As(&swapChain3))) {
+        std::cerr << "IDXGISwapChain3 is required for flip-model back buffer tracking\n";
         return 1;
+    }
+
+    ComPtr<ID3D11RenderTargetView> renderTargets[kBufferCount];
+    for (UINT i = 0; i < kBufferCount; ++i) {
+        ComPtr<ID3D11Texture2D> backBuffer;
+        if (FAILED(swapChain->GetBuffer(i, IID_PPV_ARGS(&backBuffer))) ||
+            FAILED(device->CreateRenderTargetView(backBuffer.Get(), nullptr, &renderTargets[i]))) {
+            std::cerr << "Unable to create render target for back buffer " << i << "\n";
+            return 1;
+        }
     }
 
     ComPtr<ID3DBlob> vertexBytecode;
@@ -544,7 +563,6 @@ int wmain(int argc, wchar_t** argv)
         0.0f, 1.0f,
     };
 
-    context->OMSetRenderTargets(1, renderTarget.GetAddressOf(), nullptr);
     context->RSSetViewports(1, &viewport);
     context->IASetInputLayout(nullptr);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -568,6 +586,10 @@ int wmain(int argc, wchar_t** argv)
 
     while (g_Running.load(std::memory_order_acquire) && PumpMessages()) {
         framePacer.WaitNext();
+
+        const UINT backBufferIndex = swapChain3->GetCurrentBackBufferIndex();
+        ID3D11RenderTargetView* currentRenderTarget = renderTargets[backBufferIndex].Get();
+        context->OMSetRenderTargets(1, &currentRenderTarget, nullptr);
 
         ShaderParams params {};
         params.frameIndex = frameIndex++;
