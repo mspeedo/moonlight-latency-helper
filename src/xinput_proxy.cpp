@@ -5,9 +5,9 @@
 
 namespace {
 
-using XInputGetStateFn = DWORD (WINAPI*)(DWORD, XINPUT_STATE*);
+using XInputGetStateFn = DWORD (WINAPI*)(DWORD, XINPUT_STATE*) noexcept;
 
-XInputGetStateFn ResolveRealXInputGetState()
+XInputGetStateFn ResolveRealXInputGetState() noexcept
 {
     // Load the Windows XInput implementation explicitly. The executable does
     // not link xinput.lib so calls from main.cpp resolve to the tiny wrapper
@@ -23,7 +23,7 @@ XInputGetStateFn ResolveRealXInputGetState()
 
 } // namespace
 
-extern "C" DWORD WINAPI XInputGetState(DWORD userIndex, XINPUT_STATE* state)
+extern "C" DWORD WINAPI XInputGetState(DWORD userIndex, XINPUT_STATE* state) noexcept
 {
     static const XInputGetStateFn realXInputGetState = ResolveRealXInputGetState();
     static std::atomic<bool> previousB[XUSER_MAX_COUNT] {};
