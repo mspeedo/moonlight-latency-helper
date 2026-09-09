@@ -1,0 +1,32 @@
+name: Build Windows helper
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v6
+        with:
+          name: moonlight-latency-helper-x64
+          path: build/Release/moonlight-latency-helper.exe
+          if-no-files-found: error
+          compression-level: 0
