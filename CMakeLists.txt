@@ -3,6 +3,7 @@ project(moonlight_latency_helper LANGUAGES CXX)
 
 add_executable(moonlight-latency-helper
     src/main.cpp
+    src/xinput_proxy.cpp
 )
 
 target_compile_features(moonlight-latency-helper PRIVATE cxx_std_17)
@@ -16,7 +17,6 @@ target_link_libraries(moonlight-latency-helper PRIVATE
     d3d11
     dxgi
     d3dcompiler
-    xinput
 )
 
 if(MSVC)
