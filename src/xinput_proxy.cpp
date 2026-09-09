@@ -5,9 +5,9 @@
 
 namespace {
 
-using XInputGetStateFn = DWORD (WINAPI*)(DWORD, XINPUT_STATE*) noexcept;
+using XInputGetStateFn = DWORD (WINAPI*)(DWORD, XINPUT_STATE*);
 
-XInputGetStateFn ResolveRealXInputGetState() noexcept
+XInputGetStateFn ResolveRealXInputGetState()
 {
     // Load the Windows XInput implementation explicitly. The executable does
     // not link xinput.lib so calls from main.cpp resolve to the tiny wrapper
@@ -49,6 +49,13 @@ extern "C" DWORD WINAPI XInputGetState(DWORD userIndex, XINPUT_STATE* state) noe
         if (HWND hwnd = FindWindowW(L"MoonlightLatencyHelperWindow", nullptr)) {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
+    }
+
+    // Space is a convenient local-PC smoke-test input. Expose it to the
+    // existing input thread as a virtual A hold so it follows the exact same
+    // rising-edge marker-toggle path as a real XInput A press.
+    if ((GetAsyncKeyState(VK_SPACE) & 0x8000) != 0) {
+        state->Gamepad.wButtons |= XINPUT_GAMEPAD_A;
     }
 
     return result;
