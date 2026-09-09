@@ -96,9 +96,11 @@ float4 PSMain(VSOut input) : SV_Target
     }
 
     const uint2 pixel = uint2(input.position.xy);
-    const uint2 shifted = pixel + uint2(frameIndex * 37U, frameIndex * 73U);
     const uint temporal = Hash(frameIndex * 747796405U + 2891336453U);
-    const uint seed = shifted.x * 73856093U ^ shifted.y * 19349663U ^ temporal;
+    const uint seed =
+        (pixel.x + frameIndex * 37U) * 73856093U ^
+        (pixel.y + frameIndex * 73U) * 19349663U ^
+        temporal;
 
     const float3 randomValue = float3(
         Random01(seed),
@@ -131,6 +133,7 @@ bool ParseOptions(int argc, wchar_t** argv, Options& options)
 {
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
+
         auto requireValue = [&](const wchar_t* name) -> const wchar_t* {
             if (i + 1 >= argc) {
                 std::wcerr << L"Missing value for " << name << L"\n";
@@ -197,12 +200,9 @@ bool ParseOptions(int argc, wchar_t** argv, Options& options)
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message) {
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) {
-            DestroyWindow(hwnd);
-            return 0;
-        }
-        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
     case WM_SETCURSOR:
         SetCursor(nullptr);
         return TRUE;
@@ -243,6 +243,7 @@ bool CompileShader(const char* entryPoint, const char* target, ComPtr<ID3DBlob>&
         std::cerr << "D3DCompile failed: 0x" << std::hex << static_cast<unsigned long>(hr) << "\n";
         return false;
     }
+
     return true;
 }
 
@@ -256,7 +257,11 @@ public:
         m_Period = static_cast<double>(m_Frequency) / frequencyHz;
         m_SpinTicks = static_cast<int64_t>(static_cast<double>(m_Frequency) * spinSeconds);
 
-        m_Timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        m_Timer = CreateWaitableTimerExW(
+            nullptr,
+            nullptr,
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            TIMER_ALL_ACCESS);
         if (!m_Timer) {
             m_Timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
         }
@@ -268,7 +273,9 @@ public:
 
     ~DeadlinePacer()
     {
-        if (m_Timer) CloseHandle(m_Timer);
+        if (m_Timer) {
+            CloseHandle(m_Timer);
+        }
     }
 
     void WaitNext()
@@ -279,6 +286,7 @@ public:
         LARGE_INTEGER now {};
         QueryPerformanceCounter(&now);
         m_Next += m_Period;
+
         if (static_cast<double>(now.QuadPart) - m_Next > m_Period * 2.0) {
             m_Next = static_cast<double>(now.QuadPart) + m_Period;
         }
@@ -291,7 +299,9 @@ private:
             LARGE_INTEGER now {};
             QueryPerformanceCounter(&now);
             const int64_t remaining = deadline - now.QuadPart;
-            if (remaining <= 0) return;
+            if (remaining <= 0) {
+                return;
+            }
 
             if (m_Timer && remaining > m_SpinTicks) {
                 const int64_t sleepTicks = remaining - m_SpinTicks;
@@ -299,7 +309,10 @@ private:
                 due.QuadPart = -static_cast<LONGLONG>(
                     (static_cast<long double>(sleepTicks) * 10000000.0L) /
                     static_cast<long double>(m_Frequency));
-                if (due.QuadPart == 0) due.QuadPart = -1;
+                if (due.QuadPart == 0) {
+                    due.QuadPart = -1;
+                }
+
                 if (SetWaitableTimer(m_Timer, &due, 0, nullptr, nullptr, FALSE)) {
                     WaitForSingleObject(m_Timer, INFINITE);
                     continue;
@@ -320,6 +333,7 @@ private:
 void InputThread(DWORD controllerIndex)
 {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
     DeadlinePacer pacer(1000.0, 0.00005);
     bool previousA = false;
     bool previousB = false;
@@ -344,24 +358,24 @@ void InputThread(DWORD controllerIndex)
 
         XINPUT_STATE state {};
         const DWORD result = XInputGetState(controllerIndex, &state);
-        if (result != ERROR_SUCCESS) {
+        if (result == ERROR_SUCCESS) {
+            const bool currentA = (state.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
+            const bool currentB = (state.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
+
+            if (currentA && !previousA) {
+                g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
+            }
+            if (currentB && !previousB && g_Hwnd) {
+                PostMessageW(g_Hwnd, WM_CLOSE, 0, 0);
+            }
+
+            previousA = currentA;
+            previousB = currentB;
+        }
+        else {
             previousA = false;
             previousB = false;
-            continue;
         }
-
-        const bool currentA = (state.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
-        const bool currentB = (state.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
-
-        if (currentA && !previousA) {
-            g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
-        }
-        if (currentB && !previousB && g_Hwnd) {
-            PostMessageW(g_Hwnd, WM_CLOSE, 0, 0);
-        }
-
-        previousA = currentA;
-        previousB = currentB;
     }
 }
 
@@ -369,7 +383,9 @@ bool PumpMessages()
 {
     MSG message {};
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-        if (message.message == WM_QUIT) return false;
+        if (message.message == WM_QUIT) {
+            return false;
+        }
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
@@ -382,7 +398,10 @@ int wmain(int argc, wchar_t** argv)
 {
     Options options;
     if (!ParseOptions(argc, argv, options)) {
-        if (argc > 1 && (std::wstring(argv[1]) == L"--help" || std::wstring(argv[1]) == L"-h")) return 0;
+        if (argc > 1 &&
+            (std::wstring(argv[1]) == L"--help" || std::wstring(argv[1]) == L"-h")) {
+            return 0;
+        }
         PrintUsage();
         return 1;
     }
@@ -439,7 +458,10 @@ int wmain(int argc, wchar_t** argv)
     SetFocus(g_Hwnd);
 
     const UINT deviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    const D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+    const D3D_FEATURE_LEVEL featureLevels[] = {
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0,
+    };
 
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -450,7 +472,7 @@ int wmain(int argc, wchar_t** argv)
         nullptr,
         deviceFlags,
         featureLevels,
-        2,
+        ARRAYSIZE(featureLevels),
         D3D11_SDK_VERSION,
         &device,
         &selectedFeatureLevel,
@@ -470,7 +492,8 @@ int wmain(int argc, wchar_t** argv)
             &context);
     }
     if (FAILED(hr)) {
-        std::cerr << "D3D11CreateDevice failed: 0x" << std::hex << static_cast<unsigned long>(hr) << "\n";
+        std::cerr << "D3D11CreateDevice failed: 0x"
+                  << std::hex << static_cast<unsigned long>(hr) << "\n";
         return 1;
     }
 
@@ -488,12 +511,13 @@ int wmain(int argc, wchar_t** argv)
     ComPtr<IDXGIFactory5> factory5;
     if (SUCCEEDED(factory.As(&factory5))) {
         BOOL supported = FALSE;
-        if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &supported, sizeof(supported)))) {
+        if (SUCCEEDED(factory5->CheckFeatureSupport(
+                DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                &supported,
+                sizeof(supported)))) {
             allowTearing = supported == TRUE;
         }
     }
-
-    constexpr UINT kBufferCount = 2;
 
     DXGI_SWAP_CHAIN_DESC1 swapDesc {};
     swapDesc.Width = static_cast<UINT>(width);
@@ -501,34 +525,36 @@ int wmain(int argc, wchar_t** argv)
     swapDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     swapDesc.SampleDesc.Count = 1;
     swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapDesc.BufferCount = kBufferCount;
+    swapDesc.BufferCount = 2;
     swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     swapDesc.Scaling = DXGI_SCALING_STRETCH;
     swapDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     swapDesc.Flags = allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
     ComPtr<IDXGISwapChain1> swapChain;
-    hr = factory->CreateSwapChainForHwnd(device.Get(), g_Hwnd, &swapDesc, nullptr, nullptr, &swapChain);
+    hr = factory->CreateSwapChainForHwnd(
+        device.Get(),
+        g_Hwnd,
+        &swapDesc,
+        nullptr,
+        nullptr,
+        &swapChain);
     if (FAILED(hr)) {
-        std::cerr << "CreateSwapChainForHwnd failed: 0x" << std::hex << static_cast<unsigned long>(hr) << "\n";
+        std::cerr << "CreateSwapChainForHwnd failed: 0x"
+                  << std::hex << static_cast<unsigned long>(hr) << "\n";
         return 1;
     }
     factory->MakeWindowAssociation(g_Hwnd, DXGI_MWA_NO_ALT_ENTER);
 
-    ComPtr<IDXGISwapChain3> swapChain3;
-    if (FAILED(swapChain.As(&swapChain3))) {
-        std::cerr << "IDXGISwapChain3 is required for flip-model back buffer tracking\n";
+    // D3D11 flip-model convenience semantics keep buffer 0 as the writable
+    // back buffer identity across Presents. Present unbinds it from the output
+    // merger, so the same RTV must simply be rebound before every draw.
+    ComPtr<ID3D11Texture2D> backBuffer;
+    ComPtr<ID3D11RenderTargetView> renderTarget;
+    if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer))) ||
+        FAILED(device->CreateRenderTargetView(backBuffer.Get(), nullptr, &renderTarget))) {
+        std::cerr << "Unable to create render target for back buffer 0\n";
         return 1;
-    }
-
-    ComPtr<ID3D11RenderTargetView> renderTargets[kBufferCount];
-    for (UINT i = 0; i < kBufferCount; ++i) {
-        ComPtr<ID3D11Texture2D> backBuffer;
-        if (FAILED(swapChain->GetBuffer(i, IID_PPV_ARGS(&backBuffer))) ||
-            FAILED(device->CreateRenderTargetView(backBuffer.Get(), nullptr, &renderTargets[i]))) {
-            std::cerr << "Unable to create render target for back buffer " << i << "\n";
-            return 1;
-        }
     }
 
     ComPtr<ID3DBlob> vertexBytecode;
@@ -540,8 +566,16 @@ int wmain(int argc, wchar_t** argv)
 
     ComPtr<ID3D11VertexShader> vertexShader;
     ComPtr<ID3D11PixelShader> pixelShader;
-    if (FAILED(device->CreateVertexShader(vertexBytecode->GetBufferPointer(), vertexBytecode->GetBufferSize(), nullptr, &vertexShader)) ||
-        FAILED(device->CreatePixelShader(pixelBytecode->GetBufferPointer(), pixelBytecode->GetBufferSize(), nullptr, &pixelShader))) {
+    if (FAILED(device->CreateVertexShader(
+            vertexBytecode->GetBufferPointer(),
+            vertexBytecode->GetBufferSize(),
+            nullptr,
+            &vertexShader)) ||
+        FAILED(device->CreatePixelShader(
+            pixelBytecode->GetBufferPointer(),
+            pixelBytecode->GetBufferSize(),
+            nullptr,
+            &pixelShader))) {
         std::cerr << "Unable to create shaders\n";
         return 1;
     }
@@ -558,9 +592,12 @@ int wmain(int argc, wchar_t** argv)
     }
 
     const D3D11_VIEWPORT viewport {
-        0.0f, 0.0f,
-        static_cast<float>(width), static_cast<float>(height),
-        0.0f, 1.0f,
+        0.0f,
+        0.0f,
+        static_cast<float>(width),
+        static_cast<float>(height),
+        0.0f,
+        1.0f,
     };
 
     context->RSSetViewports(1, &viewport);
@@ -587,8 +624,9 @@ int wmain(int argc, wchar_t** argv)
     while (g_Running.load(std::memory_order_acquire) && PumpMessages()) {
         framePacer.WaitNext();
 
-        const UINT backBufferIndex = swapChain3->GetCurrentBackBufferIndex();
-        ID3D11RenderTargetView* currentRenderTarget = renderTargets[backBufferIndex].Get();
+        // Flip-model Present unbinds back buffer 0 from the D3D11 output
+        // merger. Rebind the existing RTV on every frame before drawing.
+        ID3D11RenderTargetView* currentRenderTarget = renderTarget.Get();
         context->OMSetRenderTargets(1, &currentRenderTarget, nullptr);
 
         ShaderParams params {};
@@ -605,14 +643,17 @@ int wmain(int argc, wchar_t** argv)
         const UINT presentFlags = allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
         hr = swapChain->Present(0, presentFlags);
         if (FAILED(hr)) {
-            std::cerr << "Present failed: 0x" << std::hex << static_cast<unsigned long>(hr) << "\n";
+            std::cerr << "Present failed: 0x"
+                      << std::hex << static_cast<unsigned long>(hr) << "\n";
             g_Running.store(false, std::memory_order_release);
             break;
         }
     }
 
     g_Running.store(false, std::memory_order_release);
-    if (inputThread.joinable()) inputThread.join();
+    if (inputThread.joinable()) {
+        inputThread.join();
+    }
 
     SetThreadExecutionState(ES_CONTINUOUS);
     return 0;
