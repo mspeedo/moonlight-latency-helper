@@ -96,11 +96,9 @@ float4 PSMain(VSOut input) : SV_Target
     }
 
     const uint2 pixel = uint2(input.position.xy);
-    const uint temporal = Hash(frameIndex * 747796405U + 2891336453U);
-    const uint seed =
-        (pixel.x + frameIndex * 37U) * 73856093U ^
-        (pixel.y + frameIndex * 73U) * 19349663U ^
-        temporal;
+    const uint spatial = pixel.x * 73856093U ^ pixel.y * 19349663U;
+    const uint temporal = frameIndex * 747796405U;
+    const uint seed = spatial ^ temporal;
 
     const float3 randomValue = float3(
         Random01(seed),
