@@ -95,8 +95,12 @@ float4 PSMain(VSOut input) : SV_Target
         return float4(marker, marker, marker, 1.0);
     }
 
-    const uint2 pixel = uint2(input.position.xy);
-    const uint spatial = pixel.x * 73856093U ^ pixel.y * 19349663U;
+    // --noise now controls spatial frequency rather than amplitude.
+    // 100 keeps the original 1x1 per-pixel noise exactly; lower values
+    // progressively group pixels into larger blocks, up to 64x64 at 0.
+    const float blockSize = 1.0 + (1.0 - noiseStrength) * 63.0;
+    const uint2 block = uint2(input.position.xy / blockSize);
+    const uint spatial = block.x * 73856093U ^ block.y * 19349663U;
     const uint temporal = frameIndex * 747796405U;
     const uint seed = spatial ^ temporal;
 
@@ -107,9 +111,7 @@ float4 PSMain(VSOut input) : SV_Target
 
     const float low = 0.04;
     const float high = 0.30;
-    const float midpoint = (low + high) * 0.5;
-    const float amplitude = (high - low) * 0.5 * noiseStrength;
-    const float3 rgb = midpoint + (randomValue - 0.5) * (2.0 * amplitude);
+    const float3 rgb = low + randomValue * (high - low);
     return float4(rgb, 1.0);
 }
 )HLSL";
@@ -121,7 +123,7 @@ void PrintUsage()
         << L"Options:\n"
         << L"  --fps <value>              Render cadence, default 120\n"
         << L"  --controller-index <0-3>   XInput controller index, default 0\n"
-        << L"  --noise <0-100>            Dark-background noise amplitude, default 100\n"
+        << L"  --noise <0-100>            Noise spatial frequency: 100=1px, 0=64px blocks; default 100\n"
         << L"  --marker-size <pixels>     Center square size, default 32\n"
         << L"  --help                     Show this help\n\n"
         << L"A or Space toggles BLACK <-> WHITE. B or Esc exits.\n";
