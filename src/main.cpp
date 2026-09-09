@@ -278,10 +278,12 @@ public:
         }
     }
 
-    void WaitNext()
+    bool WaitNext(HANDLE wakeEvent = nullptr)
     {
         const int64_t deadline = static_cast<int64_t>(m_Next);
-        WaitUntil(deadline);
+        if (WaitUntil(deadline, wakeEvent)) {
+            return true;
+        }
 
         LARGE_INTEGER now {};
         QueryPerformanceCounter(&now);
@@ -290,17 +292,23 @@ public:
         if (static_cast<double>(now.QuadPart) - m_Next > m_Period * 2.0) {
             m_Next = static_cast<double>(now.QuadPart) + m_Period;
         }
+
+        return false;
     }
 
 private:
-    void WaitUntil(int64_t deadline)
+    bool WaitUntil(int64_t deadline, HANDLE wakeEvent)
     {
         for (;;) {
+            if (wakeEvent && WaitForSingleObject(wakeEvent, 0) == WAIT_OBJECT_0) {
+                return true;
+            }
+
             LARGE_INTEGER now {};
             QueryPerformanceCounter(&now);
             const int64_t remaining = deadline - now.QuadPart;
             if (remaining <= 0) {
-                return;
+                return false;
             }
 
             if (m_Timer && remaining > m_SpinTicks) {
@@ -314,9 +322,27 @@ private:
                 }
 
                 if (SetWaitableTimer(m_Timer, &due, 0, nullptr, nullptr, FALSE)) {
-                    WaitForSingleObject(m_Timer, INFINITE);
-                    continue;
+                    if (wakeEvent) {
+                        HANDLE handles[] = {m_Timer, wakeEvent};
+                        const DWORD waitResult = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+                        if (waitResult == WAIT_OBJECT_0 + 1) {
+                            CancelWaitableTimer(m_Timer);
+                            return true;
+                        }
+                        if (waitResult == WAIT_OBJECT_0) {
+                            continue;
+                        }
+                        CancelWaitableTimer(m_Timer);
+                    }
+                    else {
+                        WaitForSingleObject(m_Timer, INFINITE);
+                        continue;
+                    }
                 }
+            }
+
+            if (wakeEvent && WaitForSingleObject(wakeEvent, 0) == WAIT_OBJECT_0) {
+                return true;
             }
 
             YieldProcessor();
@@ -330,7 +356,13 @@ private:
     double m_Next = 0.0;
 };
 
-void InputThread(DWORD controllerIndex)
+void ToggleMarker(HANDLE renderWakeEvent)
+{
+    g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
+    SetEvent(renderWakeEvent);
+}
+
+void InputThread(DWORD controllerIndex, HANDLE renderWakeEvent)
 {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
@@ -347,7 +379,7 @@ void InputThread(DWORD controllerIndex)
         const bool currentEscape = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
 
         if (currentSpace && !previousSpace) {
-            g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
+            ToggleMarker(renderWakeEvent);
         }
         if (currentEscape && !previousEscape && g_Hwnd) {
             PostMessageW(g_Hwnd, WM_CLOSE, 0, 0);
@@ -363,7 +395,7 @@ void InputThread(DWORD controllerIndex)
             const bool currentB = (state.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
 
             if (currentA && !previousA) {
-                g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
+                ToggleMarker(renderWakeEvent);
             }
             if (currentB && !previousB && g_Hwnd) {
                 PostMessageW(g_Hwnd, WM_CLOSE, 0, 0);
@@ -617,12 +649,18 @@ int wmain(int argc, wchar_t** argv)
         << L"Tearing present: " << (allowTearing ? L"yes" : L"no") << L"\n"
         << L"A/Space toggle marker. B/Esc exit.\n";
 
-    std::thread inputThread(InputThread, options.controllerIndex);
+    HANDLE renderWakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!renderWakeEvent) {
+        std::cerr << "CreateEvent failed\n";
+        return 1;
+    }
+
+    std::thread inputThread(InputThread, options.controllerIndex, renderWakeEvent);
     DeadlinePacer framePacer(options.fps, 0.00030);
     uint32_t frameIndex = 0;
 
     while (g_Running.load(std::memory_order_acquire) && PumpMessages()) {
-        framePacer.WaitNext();
+        framePacer.WaitNext(renderWakeEvent);
 
         // Flip-model Present unbinds back buffer 0 from the D3D11 output
         // merger. Rebind the existing RTV on every frame before drawing.
@@ -654,6 +692,7 @@ int wmain(int argc, wchar_t** argv)
     if (inputThread.joinable()) {
         inputThread.join();
     }
+    CloseHandle(renderWakeEvent);
 
     SetThreadExecutionState(ES_CONTINUOUS);
     return 0;
