@@ -24,7 +24,7 @@ namespace {
 struct Options {
     double fps = 120.0;
     DWORD controllerIndex = 0;
-    float noise = 1.0f;
+    float noise = 0.5f;
     float markerSize = 32.0f;
 };
 
@@ -123,7 +123,7 @@ void PrintUsage()
         << L"Options:\n"
         << L"  --fps <value>              Render cadence, default 120\n"
         << L"  --controller-index <0-3>   XInput controller index, default 0\n"
-        << L"  --noise <0-100>            Noise spatial frequency: 100=1px, 0=64px blocks; default 100\n"
+        << L"  --noise <0-100>            Noise spatial frequency: 100=1px, 0=64px blocks; default 50\n"
         << L"  --marker-size <pixels>     Center square size, default 32\n"
         << L"  --help                     Show this help\n\n"
         << L"A or Space toggles BLACK <-> WHITE. B or Esc exits.\n";
@@ -655,12 +655,25 @@ int wmain(int argc, wchar_t** argv)
         return 1;
     }
 
+    HANDLE stopEvent = nullptr;
+    wchar_t stopEventName[512] = {};
+    const DWORD stopEventNameLength = GetEnvironmentVariableW(
+        L"SUNSHINE_LATENCY_STOP_EVENT",
+        stopEventName,
+        ARRAYSIZE(stopEventName));
+    if (stopEventNameLength > 0 && stopEventNameLength < ARRAYSIZE(stopEventName)) {
+        stopEvent = OpenEventW(SYNCHRONIZE, FALSE, stopEventName);
+    }
+
     std::thread inputThread(InputThread, options.controllerIndex, renderWakeEvent);
     DeadlinePacer framePacer(options.fps, 0.00030);
     uint32_t frameIndex = 0;
 
     while (g_Running.load(std::memory_order_acquire) && PumpMessages()) {
         framePacer.WaitNext(renderWakeEvent);
+        if (stopEvent && WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
+            break;
+        }
 
         // Flip-model Present unbinds back buffer 0 from the D3D11 output
         // merger. Rebind the existing RTV on every frame before drawing.
@@ -686,14 +699,17 @@ int wmain(int argc, wchar_t** argv)
             g_Running.store(false, std::memory_order_release);
             break;
         }
+
     }
 
     g_Running.store(false, std::memory_order_release);
     if (inputThread.joinable()) {
         inputThread.join();
     }
+    if (stopEvent) {
+        CloseHandle(stopEvent);
+    }
     CloseHandle(renderWakeEvent);
-
     SetThreadExecutionState(ES_CONTINUOUS);
     return 0;
 }
