@@ -51,8 +51,8 @@ Executable:
 build\Release\moonlight-latency-helper.exe
 ```
 
-GitHub Actions builds a Release x64 executable on pushes to `main`, pull requests,
-or a manual workflow dispatch.
+GitHub Actions builds a Release x64 executable on pushes to `main` or
+`sunshine-benchmark-integration`, pull requests, or a manual workflow dispatch.
 
 ## Usage
 
