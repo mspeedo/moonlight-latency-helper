@@ -25,9 +25,13 @@ The result is a software **client input receipt -> client present submission** m
   pauses and jumps easier to judge without a competing motion layer.
 - Motion follows elapsed QPC time, including on input-triggered renders; seamless
   eight-screen repeats keep positions precise during long runs.
-- Dynamic noise/grain is completely disabled. The existing `--noise <0-100>`
-  argument is accepted and validated for compatibility but has no effect.
-- A fixed marker square around the exact stream center is forced to pure black or pure white, so Moonlight's single-center-pixel detector cannot be triggered by the moving background.
+- Fresh fine RGB grain every frame stresses compression while the landmarks
+  remain clean enough to track visually. At the default `--noise 50`, grain blocks
+  are approximately 1.68 pixels wide; the grain's channel range is +/-0.12.
+- The existing `--noise` control still adjusts spatial frequency from 64-pixel
+  blocks at 0 to per-pixel grain at 100. Its curve is now biased toward fine detail
+  (the previous default produced 32.5-pixel blocks). It does not adjust amplitude.
+- A fixed marker square around the exact stream center is forced to pure black or pure white, so Moonlight's single-center-pixel detector cannot be triggered by unrelated background noise.
 - XInput **A** toggles the center marker black <-> white.
 - Keyboard **Space** also toggles the center marker for local PC smoke testing.
 - XInput **B** closes the helper.
@@ -62,7 +66,7 @@ Options:
 ```text
 --fps <value>              Render cadence, default 120
 --controller-index <0-3>   XInput controller index, default 0
---noise <0-100>            Ignored (compatibility only); noise is disabled
+--noise <0-100>            Grain spatial frequency: 100=1px, 0=64px blocks; default 50 (~1.68px)
 --marker-size <pixels>     Center marker square size, default 32
 --help                     Show help
 ```
@@ -87,7 +91,7 @@ The initial center marker is black.
 ## Visual hitch detection and drop-in replacement
 
 No new options or configuration changes are required. The executable name,
-other option names/ranges/defaults, input controls, centre marker, and Sunshine
+option names/ranges/defaults, input controls, centre marker, and Sunshine
 `SUNSHINE_LATENCY_STOP_EVENT` integration are preserved. Replace the existing
 executable after building; the existing Moonlight/Sunshine launcher arguments work
 unchanged.
@@ -97,10 +101,10 @@ frame appears as a pause followed by a jump. At 1920 pixels wide and 120 FPS,
 the main layer advances about 8 pixels per normal frame. The animation exposes
 end-to-end cadence problems; it cannot identify which streaming stage caused them.
 
-Without dynamic noise, the scene is easier to compress and may use substantially
-less bandwidth. This version prioritizes clean motion for hitch detection over
-bandwidth saturation. Actual bitrate depends on resolution, FPS, codec, and
-encoder rate control.
+The default grain is designed to keep compression demand high, but actual bitrate
+depends on resolution, FPS, codec, and encoder rate control. Check the stream's
+measured bitrate to establish whether it reaches your configured target. The helper
+does not control the encoder or force network traffic to a particular rate.
 
 ## Recommended test sequence
 
