@@ -37,7 +37,7 @@ struct ShaderParams {
     float width;
     float height;
     float scrollOffset;
-    float detailOffset;
+    float padding; // Keep the constant buffer aligned to 16 bytes.
 };
 static_assert(sizeof(ShaderParams) == 32, "ShaderParams/HLSL constant-buffer mismatch");
 
@@ -55,7 +55,7 @@ cbuffer Params : register(b0)
     float width;
     float height;
     float scrollOffset;
-    float detailOffset;
+    float padding; // Keep the constant buffer aligned to 16 bytes.
 };
 
 struct VSOut
@@ -147,19 +147,6 @@ float4 PSMain(VSOut input) : SV_Target
                                          abs(diamondDistance - 0.17));
     rgb = lerp(rgb, float3(0.90, 0.68, 0.30), diamond);
 
-    // Sparse smaller outlines move at 65% of the wall speed. Different motion
-    // and occlusion add complexity without covering the primary landmarks.
-    const float2 detail = float2(frac((uv.x - detailOffset) / 8.0) * 96.0,
-                                 uv.y * 9.0);
-    const uint2 detailCell = uint2(floor(detail));
-    const float2 detailPixel = float2(12.0 / width, 9.0 / height);
-    const float2 boxDistance = abs(frac(detail) - 0.5) - float2(0.18, 0.12);
-    const float boxEdge = abs(max(boxDistance.x / detailPixel.x,
-                                  boxDistance.y / detailPixel.y));
-    const float visible = Random01(detailCell.x * 19349663U ^
-                                    detailCell.y * 73856093U) > 0.55 ? 1.0 : 0.0;
-    const float outline = visible * (1.0 - smoothstep(0.75, 1.75, boxEdge));
-    rgb = lerp(rgb, float3(0.52, 0.70, 0.73), outline * 0.65);
     return float4(rgb, 1.0);
 }
 )HLSL";
@@ -741,13 +728,12 @@ int wmain(int argc, wchar_t** argv)
         // Input-triggered renders can occur between cadence deadlines. Use
         // elapsed time, not the render count, so they do not speed up motion.
         // Wrap in double precision before conversion to float to preserve
-        // subpixel movement during long runs. Both shader layers repeat at 8.
+        // subpixel movement during long runs. The background repeats at 8.
         LARGE_INTEGER motionNow {};
         QueryPerformanceCounter(&motionNow);
         const double elapsed = static_cast<double>(motionNow.QuadPart - motionStart.QuadPart) /
                                static_cast<double>(motionFrequency.QuadPart);
         params.scrollOffset = static_cast<float>(std::fmod(elapsed * 0.5, 8.0));
-        params.detailOffset = static_cast<float>(std::fmod(elapsed * 0.325, 8.0));
         context->UpdateSubresource(constantBuffer.Get(), 0, nullptr, &params, 0, 0);
 
         context->Draw(3, 0);

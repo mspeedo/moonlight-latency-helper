@@ -21,7 +21,8 @@ The result is a software **client input receipt -> client present submission** m
 - Dedicated high-priority XInput polling thread.
 - Fixed render cadence driven by QPC; default **120 FPS**.
 - Coloured textured tiles and clear vertical/diamond landmarks move right at
-  half a screen-width per second, with smaller outlines moving at 65% of that speed.
+  half a screen-width per second. All landmarks share the same motion, making
+  pauses and jumps easier to judge without a competing motion layer.
 - Motion follows elapsed QPC time, including on input-triggered renders; seamless
   eight-screen repeats keep positions precise during long runs.
 - Fresh fine RGB grain every frame stresses compression while the landmarks
