@@ -25,19 +25,18 @@ namespace {
 struct Options {
     double fps = 120.0;
     DWORD controllerIndex = 0;
-    float noise = 0.5f;
     float markerSize = 32.0f;
 };
 
 struct ShaderParams {
-    uint32_t frameIndex;
     uint32_t markerWhite;
-    float noiseStrength;
     float markerHalfSize;
     float width;
     float height;
     float scrollOffset;
-    float padding; // Keep the constant buffer aligned to 16 bytes.
+    float padding0; // Keep the constant buffer aligned to 16 bytes.
+    float padding1;
+    float padding2;
 };
 static_assert(sizeof(ShaderParams) == 32, "ShaderParams/HLSL constant-buffer mismatch");
 
@@ -48,14 +47,14 @@ HWND g_Hwnd = nullptr;
 const char* kShaderSource = R"HLSL(
 cbuffer Params : register(b0)
 {
-    uint frameIndex;
     uint markerWhite;
-    float noiseStrength;
     float markerHalfSize;
     float width;
     float height;
     float scrollOffset;
-    float padding; // Keep the constant buffer aligned to 16 bytes.
+    float padding0; // Keep the constant buffer aligned to 16 bytes.
+    float padding1;
+    float padding2;
 };
 
 struct VSOut
@@ -118,17 +117,7 @@ float4 PSMain(VSOut input) : SV_Target
     // when a subpixel scrolling position crosses an integer coordinate.
     rgb += 0.035 * sin((wall.x * 9.0 + wall.y * 13.0) * 6.2831853);
 
-    // Keep the existing --noise range/endpoints, but bias its middle towards
-    // fine grain: default 50 is about 1.68px instead of 32.5px blocks. Fresh
-    // RGB detail resists motion prediction even when the wall scrolls rigidly.
-    const float coarse = 1.0 - noiseStrength;
-    const float blockSize = exp2(6.0 * coarse * coarse * coarse);
-    const uint2 block = uint2(input.position.xy / blockSize);
-    const uint spatial = block.x * 73856093U ^ block.y * 19349663U;
-    const uint temporal = frameIndex * 747796405U;
-    rgb += 0.24 * (RandomRGB(spatial ^ temporal) - 0.5);
-
-    // Draw landmarks after the grain to leave clean, trackable edges. These
+    // Draw clean, trackable landmark edges. These
     // analytic ramps cover about one pixel and do not quantize the movement.
     const float2 edgeDistance = min(local, 1.0 - local) / pixel;
     const float grout = 1.0 - smoothstep(1.0, 2.0,
@@ -158,7 +147,7 @@ void PrintUsage()
         << L"Options:\n"
         << L"  --fps <value>              Render cadence, default 120\n"
         << L"  --controller-index <0-3>   XInput controller index, default 0\n"
-        << L"  --noise <0-100>            Grain spatial frequency: 100=1px, 0=64px blocks; default 50 (~1.68px)\n"
+        << L"  --noise <0-100>            Ignored (compatibility only); noise is disabled\n"
         << L"  --marker-size <pixels>     Center square size, default 32\n"
         << L"  --help                     Show this help\n\n"
         << L"A or Space toggles BLACK <-> WHITE. B or Esc exits.\n";
@@ -210,7 +199,7 @@ bool ParseOptions(int argc, wchar_t** argv, Options& options)
                 std::wcerr << L"--noise must be between 0 and 100\n";
                 return false;
             }
-            options.noise = static_cast<float>(parsed / 100.0);
+            // Accepted for compatibility with existing launcher arguments; ignored.
             continue;
         }
         if (arg == L"--marker-size") {
@@ -680,7 +669,7 @@ int wmain(int argc, wchar_t** argv)
         << L"Render cadence: " << options.fps << L" FPS\n"
         << L"XInput controller: " << options.controllerIndex << L"\n"
         << L"Center marker: " << options.markerSize << L" px, starts BLACK\n"
-        << L"Background: scrolling textured tiles, landmarks and dynamic grain\n"
+        << L"Background: scrolling textured tiles and landmarks (noise disabled)\n"
         << L"Tearing present: " << (allowTearing ? L"yes" : L"no") << L"\n"
         << L"A/Space toggle marker. B/Esc exit.\n";
 
@@ -702,7 +691,6 @@ int wmain(int argc, wchar_t** argv)
 
     std::thread inputThread(InputThread, options.controllerIndex, renderWakeEvent);
     DeadlinePacer framePacer(options.fps, 0.00030);
-    uint32_t frameIndex = 0;
     LARGE_INTEGER motionFrequency {}, motionStart {};
     QueryPerformanceFrequency(&motionFrequency);
     QueryPerformanceCounter(&motionStart);
@@ -719,9 +707,7 @@ int wmain(int argc, wchar_t** argv)
         context->OMSetRenderTargets(1, &currentRenderTarget, nullptr);
 
         ShaderParams params {};
-        params.frameIndex = frameIndex++;
         params.markerWhite = g_MarkerWhite.load(std::memory_order_acquire);
-        params.noiseStrength = options.noise;
         params.markerHalfSize = options.markerSize * 0.5f;
         params.width = static_cast<float>(width);
         params.height = static_cast<float>(height);
