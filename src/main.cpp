@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -22,9 +23,9 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 struct Options {
-    double fps = 120.0;
+    double fps = 117.0;
     DWORD controllerIndex = 0;
-    float noise = 1.0f;
+    float noise = 0.5f;
     float markerSize = 32.0f;
 };
 
@@ -35,8 +36,8 @@ struct ShaderParams {
     float markerHalfSize;
     float width;
     float height;
-    float padding0;
-    float padding1;
+    float scrollOffset;
+    float padding; // Keep the constant buffer aligned to 16 bytes.
 };
 static_assert(sizeof(ShaderParams) == 32, "ShaderParams/HLSL constant-buffer mismatch");
 
@@ -53,8 +54,8 @@ cbuffer Params : register(b0)
     float markerHalfSize;
     float width;
     float height;
-    float padding0;
-    float padding1;
+    float scrollOffset;
+    float padding; // Keep the constant buffer aligned to 16 bytes.
 };
 
 struct VSOut
@@ -85,6 +86,12 @@ float Random01(uint seed)
     return float(Hash(seed) & 0x00ffffffU) / 16777215.0;
 }
 
+float3 RandomRGB(uint seed)
+{
+    return float3(Random01(seed), Random01(seed ^ 0x9e3779b9U),
+                  Random01(seed ^ 0x85ebca6bU));
+}
+
 float4 PSMain(VSOut input) : SV_Target
 {
     const float2 center = float2(width, height) * 0.5;
@@ -95,23 +102,51 @@ float4 PSMain(VSOut input) : SV_Target
         return float4(marker, marker, marker, 1.0);
     }
 
-    // --noise now controls spatial frequency rather than amplitude.
-    // 100 keeps the original 1x1 per-pixel noise exactly; lower values
-    // progressively group pixels into larger blocks, up to 64x64 at 0.
-    const float blockSize = 1.0 + (1.0 - noiseStrength) * 63.0;
+    // A periodic wall of coloured tiles moves right at half a screen/second.
+    // The eight-screen repeat matches the CPU offset wrap exactly, including
+    // the cell hashes, so wrapping cannot introduce a scene-wide jump.
+    const float2 uv = input.position.xy / float2(width, height);
+    const float2 wall = float2(frac((uv.x - scrollOffset) / 8.0) * 48.0,
+                               uv.y * 5.0);
+    const uint2 tile = uint2(floor(wall));
+    const float2 local = frac(wall);
+    const float2 pixel = float2(6.0 / width, 5.0 / height);
+    const uint tileSeed = tile.x * 73856093U ^ tile.y * 19349663U;
+    float3 rgb = 0.16 + 0.24 * RandomRGB(tileSeed);
+
+    // Smooth surface detail travels with the tiles, rather than sparkling
+    // when a subpixel scrolling position crosses an integer coordinate.
+    rgb += 0.035 * sin((wall.x * 9.0 + wall.y * 13.0) * 6.2831853);
+
+    // Keep the existing --noise range/endpoints, but bias its middle towards
+    // fine grain: default 50 is about 1.68px instead of 32.5px blocks. Fresh
+    // RGB detail resists motion prediction even when the wall scrolls rigidly.
+    const float coarse = 1.0 - noiseStrength;
+    const float blockSize = exp2(6.0 * coarse * coarse * coarse);
     const uint2 block = uint2(input.position.xy / blockSize);
     const uint spatial = block.x * 73856093U ^ block.y * 19349663U;
     const uint temporal = frameIndex * 747796405U;
-    const uint seed = spatial ^ temporal;
+    rgb += 0.24 * (RandomRGB(spatial ^ temporal) - 0.5);
 
-    const float3 randomValue = float3(
-        Random01(seed),
-        Random01(seed ^ 0x9e3779b9U),
-        Random01(seed ^ 0x85ebca6bU));
+    // Draw landmarks after the grain to leave clean, trackable edges. These
+    // analytic ramps cover about one pixel and do not quantize the movement.
+    const float2 edgeDistance = min(local, 1.0 - local) / pixel;
+    const float grout = 1.0 - smoothstep(1.0, 2.0,
+                                        min(edgeDistance.x, edgeDistance.y));
+    rgb = lerp(rgb, float3(0.07, 0.07, 0.07), grout);
 
-    const float low = 0.04;
-    const float high = 0.30;
-    const float3 rgb = low + randomValue * (high - low);
+    // Vary the upright positions/widths to avoid an identical stripe train.
+    const float columnRandom = Random01(tile.x * 747796405U);
+    const float uprightDistance = abs(local.x - (0.16 + 0.12 * columnRandom));
+    const float upright = 1.0 - smoothstep(0.018 + 0.018 * columnRandom,
+        0.018 + 0.018 * columnRandom + pixel.x, uprightDistance);
+    rgb = lerp(rgb, float3(0.78, 0.83, 0.88), upright);
+
+    const float diamondDistance = abs(local.x - 0.65) + abs(local.y - 0.5);
+    const float diamond = 1.0 - smoothstep(0.015, 0.015 + pixel.x + pixel.y,
+                                         abs(diamondDistance - 0.17));
+    rgb = lerp(rgb, float3(0.90, 0.68, 0.30), diamond);
+
     return float4(rgb, 1.0);
 }
 )HLSL";
@@ -121,9 +156,9 @@ void PrintUsage()
     std::wcout
         << L"Moonlight Latency Helper\n\n"
         << L"Options:\n"
-        << L"  --fps <value>              Render cadence, default 120\n"
+        << L"  --fps <value>              Render cadence, default 117\n"
         << L"  --controller-index <0-3>   XInput controller index, default 0\n"
-        << L"  --noise <0-100>            Noise spatial frequency: 100=1px, 0=64px blocks; default 100\n"
+        << L"  --noise <0-100>            Grain spatial frequency: 100=1px, 0=64px blocks; default 50 (~1.68px)\n"
         << L"  --marker-size <pixels>     Center square size, default 32\n"
         << L"  --help                     Show this help\n\n"
         << L"A or Space toggles BLACK <-> WHITE. B or Esc exits.\n";
@@ -645,7 +680,7 @@ int wmain(int argc, wchar_t** argv)
         << L"Render cadence: " << options.fps << L" FPS\n"
         << L"XInput controller: " << options.controllerIndex << L"\n"
         << L"Center marker: " << options.markerSize << L" px, starts BLACK\n"
-        << L"Background: dark dynamic noise\n"
+        << L"Background: scrolling textured tiles, landmarks and dynamic grain\n"
         << L"Tearing present: " << (allowTearing ? L"yes" : L"no") << L"\n"
         << L"A/Space toggle marker. B/Esc exit.\n";
 
@@ -655,12 +690,28 @@ int wmain(int argc, wchar_t** argv)
         return 1;
     }
 
+    HANDLE stopEvent = nullptr;
+    wchar_t stopEventName[512] = {};
+    const DWORD stopEventNameLength = GetEnvironmentVariableW(
+        L"SUNSHINE_LATENCY_STOP_EVENT",
+        stopEventName,
+        ARRAYSIZE(stopEventName));
+    if (stopEventNameLength > 0 && stopEventNameLength < ARRAYSIZE(stopEventName)) {
+        stopEvent = OpenEventW(SYNCHRONIZE, FALSE, stopEventName);
+    }
+
     std::thread inputThread(InputThread, options.controllerIndex, renderWakeEvent);
     DeadlinePacer framePacer(options.fps, 0.00030);
     uint32_t frameIndex = 0;
+    LARGE_INTEGER motionFrequency {}, motionStart {};
+    QueryPerformanceFrequency(&motionFrequency);
+    QueryPerformanceCounter(&motionStart);
 
     while (g_Running.load(std::memory_order_acquire) && PumpMessages()) {
         framePacer.WaitNext(renderWakeEvent);
+        if (stopEvent && WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
+            break;
+        }
 
         // Flip-model Present unbinds back buffer 0 from the D3D11 output
         // merger. Rebind the existing RTV on every frame before drawing.
@@ -674,6 +725,15 @@ int wmain(int argc, wchar_t** argv)
         params.markerHalfSize = options.markerSize * 0.5f;
         params.width = static_cast<float>(width);
         params.height = static_cast<float>(height);
+        // Input-triggered renders can occur between cadence deadlines. Use
+        // elapsed time, not the render count, so they do not speed up motion.
+        // Wrap in double precision before conversion to float to preserve
+        // subpixel movement during long runs. The background repeats at 8.
+        LARGE_INTEGER motionNow {};
+        QueryPerformanceCounter(&motionNow);
+        const double elapsed = static_cast<double>(motionNow.QuadPart - motionStart.QuadPart) /
+                               static_cast<double>(motionFrequency.QuadPart);
+        params.scrollOffset = static_cast<float>(std::fmod(elapsed * 0.5, 8.0));
         context->UpdateSubresource(constantBuffer.Get(), 0, nullptr, &params, 0, 0);
 
         context->Draw(3, 0);
@@ -686,14 +746,17 @@ int wmain(int argc, wchar_t** argv)
             g_Running.store(false, std::memory_order_release);
             break;
         }
+
     }
 
     g_Running.store(false, std::memory_order_release);
     if (inputThread.joinable()) {
         inputThread.join();
     }
+    if (stopEvent) {
+        CloseHandle(stopEvent);
+    }
     CloseHandle(renderWakeEvent);
-
     SetThreadExecutionState(ES_CONTINUOUS);
     return 0;
 }

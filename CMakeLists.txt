@@ -19,6 +19,12 @@ target_link_libraries(moonlight-latency-helper PRIVATE
     xinput
 )
 
+if(MINGW)
+    # main.cpp intentionally uses wmain() for UTF-16 Windows arguments.
+    # MinGW requires -municode to select the matching CRT entry point.
+    target_link_options(moonlight-latency-helper PRIVATE -municode)
+endif()
+
 if(MSVC)
     target_compile_options(moonlight-latency-helper PRIVATE /W4 /permissive-)
 endif()
