@@ -317,12 +317,6 @@ public:
     {
         const int64_t deadline = static_cast<int64_t>(m_Next);
         if (WaitUntil(deadline, wakeEvent)) {
-            // Input-triggered marker renders become the new cadence anchor.
-            // This consumes the interrupted cadence slot instead of inserting
-            // an extra off-cadence frame before the old deadline.
-            LARGE_INTEGER now {};
-            QueryPerformanceCounter(&now);
-            m_Next = static_cast<double>(now.QuadPart) + m_Period;
             return true;
         }
 
