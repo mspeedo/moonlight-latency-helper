@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -42,8 +43,46 @@ struct ShaderParams {
 static_assert(sizeof(ShaderParams) == 32, "ShaderParams/HLSL constant-buffer mismatch");
 
 std::atomic<bool> g_Running { true };
-std::atomic<uint32_t> g_MarkerWhite { 0 };
 HWND g_Hwnd = nullptr;
+
+constexpr uint32_t kWaitMapMagic = 0x4D4C4257U; // "MLBW"
+constexpr uint32_t kWaitMapVersion = 1;
+constexpr size_t kWaitRecordCount = 64;
+
+struct WaitRecord {
+    volatile LONG64 sequence;
+    volatile LONG64 waitUs;
+};
+
+struct SharedWaitState {
+    uint32_t magic;
+    uint32_t version;
+    WaitRecord records[kWaitRecordCount];
+};
+
+std::mutex g_MarkerMutex;
+uint32_t g_MarkerWhite = 0;
+uint64_t g_PulseSequence = 0;
+uint64_t g_PendingPulseSequence = 0;
+int64_t g_PendingPulseQpc = 0;
+SharedWaitState* g_WaitState = nullptr;
+
+void PublishWait(uint64_t sequence, uint64_t waitUs)
+{
+    if (!g_WaitState || g_WaitState->magic != kWaitMapMagic ||
+            g_WaitState->version != kWaitMapVersion || sequence == 0) {
+        return;
+    }
+
+    WaitRecord& record = g_WaitState->records[sequence % kWaitRecordCount];
+
+    // Clear the publication token first so Sunshine can never pair a new wait
+    // value with the previous sequence while this slot is being overwritten.
+    InterlockedExchange64(&record.sequence, 0);
+    InterlockedExchange64(&record.waitUs, static_cast<LONG64>(waitUs));
+    MemoryBarrier();
+    InterlockedExchange64(&record.sequence, static_cast<LONG64>(sequence));
+}
 
 const char* kShaderSource = R"HLSL(
 cbuffer Params : register(b0)
@@ -331,6 +370,13 @@ public:
         return false;
     }
 
+    void RebaseAfterPresent()
+    {
+        LARGE_INTEGER now {};
+        QueryPerformanceCounter(&now);
+        m_Next = static_cast<double>(now.QuadPart) + m_Period;
+    }
+
 private:
     bool WaitUntil(int64_t deadline, HANDLE wakeEvent)
     {
@@ -391,13 +437,18 @@ private:
     double m_Next = 0.0;
 };
 
-void ToggleMarker(HANDLE renderWakeEvent)
+void ToggleMarker()
 {
-    g_MarkerWhite.fetch_xor(1U, std::memory_order_acq_rel);
-    SetEvent(renderWakeEvent);
+    LARGE_INTEGER now {};
+    QueryPerformanceCounter(&now);
+
+    std::scoped_lock lock(g_MarkerMutex);
+    g_MarkerWhite ^= 1U;
+    g_PendingPulseSequence = ++g_PulseSequence;
+    g_PendingPulseQpc = now.QuadPart;
 }
 
-void InputThread(DWORD controllerIndex, HANDLE renderWakeEvent)
+void InputThread(DWORD controllerIndex)
 {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
@@ -414,7 +465,7 @@ void InputThread(DWORD controllerIndex, HANDLE renderWakeEvent)
         const bool currentEscape = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
 
         if (currentSpace && !previousSpace) {
-            ToggleMarker(renderWakeEvent);
+            ToggleMarker();
         }
         if (currentEscape && !previousEscape && g_Hwnd) {
             PostMessageW(g_Hwnd, WM_CLOSE, 0, 0);
@@ -430,7 +481,7 @@ void InputThread(DWORD controllerIndex, HANDLE renderWakeEvent)
             const bool currentB = (state.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
 
             if (currentA && !previousA) {
-                ToggleMarker(renderWakeEvent);
+                ToggleMarker();
             }
             if (currentB && !previousB && g_Hwnd) {
                 PostMessageW(g_Hwnd, WM_CLOSE, 0, 0);
@@ -684,12 +735,6 @@ int wmain(int argc, wchar_t** argv)
         << L"Tearing present: " << (allowTearing ? L"yes" : L"no") << L"\n"
         << L"A/Space toggle marker. B/Esc exit.\n";
 
-    HANDLE renderWakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!renderWakeEvent) {
-        std::cerr << "CreateEvent failed\n";
-        return 1;
-    }
-
     HANDLE stopEvent = nullptr;
     wchar_t stopEventName[512] = {};
     const DWORD stopEventNameLength = GetEnvironmentVariableW(
@@ -700,7 +745,25 @@ int wmain(int argc, wchar_t** argv)
         stopEvent = OpenEventW(SYNCHRONIZE, FALSE, stopEventName);
     }
 
-    std::thread inputThread(InputThread, options.controllerIndex, renderWakeEvent);
+    HANDLE waitMap = nullptr;
+    wchar_t waitMapName[512] = {};
+    const DWORD waitMapNameLength = GetEnvironmentVariableW(
+        L"SUNSHINE_LATENCY_WAIT_MAP",
+        waitMapName,
+        ARRAYSIZE(waitMapName));
+    if (waitMapNameLength > 0 && waitMapNameLength < ARRAYSIZE(waitMapName)) {
+        waitMap = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, waitMapName);
+        if (waitMap) {
+            g_WaitState = static_cast<SharedWaitState*>(
+                MapViewOfFile(waitMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(SharedWaitState)));
+            if (!g_WaitState) {
+                CloseHandle(waitMap);
+                waitMap = nullptr;
+            }
+        }
+    }
+
+    std::thread inputThread(InputThread, options.controllerIndex);
     DeadlinePacer framePacer(options.fps, 0.00030);
     uint32_t frameIndex = 0;
     LARGE_INTEGER motionFrequency {}, motionStart {};
@@ -708,7 +771,7 @@ int wmain(int argc, wchar_t** argv)
     QueryPerformanceCounter(&motionStart);
 
     while (g_Running.load(std::memory_order_acquire) && PumpMessages()) {
-        framePacer.WaitNext(renderWakeEvent);
+        framePacer.WaitNext();
         if (stopEvent && WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
             break;
         }
@@ -718,9 +781,32 @@ int wmain(int argc, wchar_t** argv)
         ID3D11RenderTargetView* currentRenderTarget = renderTarget.Get();
         context->OMSetRenderTargets(1, &currentRenderTarget, nullptr);
 
+        LARGE_INTEGER markerCommit {};
+        QueryPerformanceCounter(&markerCommit);
+
+        uint32_t markerWhite = 0;
+        uint64_t pulseSequence = 0;
+        int64_t pulseInputQpc = 0;
+        {
+            std::scoped_lock lock(g_MarkerMutex);
+            markerWhite = g_MarkerWhite;
+            pulseSequence = g_PendingPulseSequence;
+            pulseInputQpc = g_PendingPulseQpc;
+            g_PendingPulseSequence = 0;
+            g_PendingPulseQpc = 0;
+        }
+
+        if (pulseSequence != 0 && pulseInputQpc > 0 &&
+                markerCommit.QuadPart >= pulseInputQpc) {
+            const uint64_t waitUs = static_cast<uint64_t>(
+                (static_cast<long double>(markerCommit.QuadPart - pulseInputQpc) * 1000000.0L) /
+                static_cast<long double>(motionFrequency.QuadPart));
+            PublishWait(pulseSequence, waitUs);
+        }
+
         ShaderParams params {};
         params.frameIndex = frameIndex++;
-        params.markerWhite = g_MarkerWhite.load(std::memory_order_acquire);
+        params.markerWhite = markerWhite;
         params.noiseStrength = options.noise;
         params.markerHalfSize = options.markerSize * 0.5f;
         params.width = static_cast<float>(width);
@@ -747,6 +833,11 @@ int wmain(int argc, wchar_t** argv)
             break;
         }
 
+        // Strict cadence: the next frame may not begin until one complete
+        // configured frame period after this Present returned. Benchmark input
+        // can change the next frame's marker, but it can never insert an
+        // additional render between regular cadence frames.
+        framePacer.RebaseAfterPresent();
     }
 
     g_Running.store(false, std::memory_order_release);
@@ -756,7 +847,13 @@ int wmain(int argc, wchar_t** argv)
     if (stopEvent) {
         CloseHandle(stopEvent);
     }
-    CloseHandle(renderWakeEvent);
+    if (g_WaitState) {
+        UnmapViewOfFile(g_WaitState);
+        g_WaitState = nullptr;
+    }
+    if (waitMap) {
+        CloseHandle(waitMap);
+    }
     SetThreadExecutionState(ES_CONTINUOUS);
     return 0;
 }
