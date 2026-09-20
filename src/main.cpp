@@ -453,10 +453,16 @@ void InputThread(DWORD controllerIndex)
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
     DeadlinePacer pacer(1000.0, 0.00005);
-    bool previousA = false;
-    bool previousB = false;
-    bool previousSpace = false;
-    bool previousEscape = false;
+    bool previousSpace = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+    bool previousEscape = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+
+    XINPUT_STATE initialState {};
+    const bool haveInitialState =
+            XInputGetState(controllerIndex, &initialState) == ERROR_SUCCESS;
+    bool previousA = haveInitialState &&
+            (initialState.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
+    bool previousB = haveInitialState &&
+            (initialState.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
 
     while (g_Running.load(std::memory_order_acquire)) {
         pacer.WaitNext();
@@ -781,12 +787,10 @@ int wmain(int argc, wchar_t** argv)
         ID3D11RenderTargetView* currentRenderTarget = renderTarget.Get();
         context->OMSetRenderTargets(1, &currentRenderTarget, nullptr);
 
-        LARGE_INTEGER markerCommit {};
-        QueryPerformanceCounter(&markerCommit);
-
         uint32_t markerWhite = 0;
         uint64_t pulseSequence = 0;
         int64_t pulseInputQpc = 0;
+        LARGE_INTEGER markerCommit {};
         {
             std::scoped_lock lock(g_MarkerMutex);
             markerWhite = g_MarkerWhite;
@@ -794,6 +798,7 @@ int wmain(int argc, wchar_t** argv)
             pulseInputQpc = g_PendingPulseQpc;
             g_PendingPulseSequence = 0;
             g_PendingPulseQpc = 0;
+            QueryPerformanceCounter(&markerCommit);
         }
 
         if (pulseSequence != 0 && pulseInputQpc > 0 &&
