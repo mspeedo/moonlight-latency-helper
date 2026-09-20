@@ -26,18 +26,17 @@ namespace {
 struct Options {
     double fps = 117.0;
     DWORD controllerIndex = 0;
-    float noise = 0.5f;
     float markerSize = 32.0f;
 };
 
 struct ShaderParams {
     uint32_t frameIndex;
     uint32_t markerWhite;
-    float noiseStrength;
     float markerHalfSize;
     float width;
     float height;
     float scrollOffset;
+    float motionTime;
     float padding; // Keep the constant buffer aligned to 16 bytes.
 };
 static_assert(sizeof(ShaderParams) == 32, "ShaderParams/HLSL constant-buffer mismatch");
@@ -89,11 +88,11 @@ cbuffer Params : register(b0)
 {
     uint frameIndex;
     uint markerWhite;
-    float noiseStrength;
     float markerHalfSize;
     float width;
     float height;
     float scrollOffset;
+    float motionTime;
     float padding; // Keep the constant buffer aligned to 16 bytes.
 };
 
@@ -110,83 +109,120 @@ VSOut VSMain(uint vertexId : SV_VertexID)
     return output;
 }
 
-uint Hash(uint x)
+float AntiAliasedLine(float phase)
 {
-    x ^= x >> 16;
-    x *= 0x7feb352dU;
-    x ^= x >> 15;
-    x *= 0x846ca68bU;
-    x ^= x >> 16;
-    return x;
-}
-
-float Random01(uint seed)
-{
-    return float(Hash(seed) & 0x00ffffffU) / 16777215.0;
-}
-
-float3 RandomRGB(uint seed)
-{
-    return float3(Random01(seed), Random01(seed ^ 0x9e3779b9U),
-                  Random01(seed ^ 0x85ebca6bU));
+    const float distanceToLine = abs(frac(phase) - 0.5);
+    const float widthInPhase = max(fwidth(phase) * 0.85, 0.0015);
+    return 1.0 - smoothstep(widthInPhase, widthInPhase * 2.1, distanceToLine);
 }
 
 float4 PSMain(VSOut input) : SV_Target
 {
-    const float2 center = float2(width, height) * 0.5;
+    const float2 resolution = float2(width, height);
+    const float2 center = resolution * 0.5;
     const float2 d = abs(input.position.xy - center);
 
+    // Keep the benchmark detector target completely independent of the stress
+    // pattern. The exact stream-center sample is always pure black or white.
     if (d.x < markerHalfSize && d.y < markerHalfSize) {
         const float marker = markerWhite != 0 ? 1.0 : 0.0;
         return float4(marker, marker, marker, 1.0);
     }
 
-    // A periodic wall of coloured tiles moves right at half a screen/second.
-    // The eight-screen repeat matches the CPU offset wrap exactly, including
-    // the cell hashes, so wrapping cannot introduce a scene-wide jump.
-    const float2 uv = input.position.xy / float2(width, height);
+    const float twoPi = 6.28318530718;
+    const float2 uv = input.position.xy / resolution;
+    const float t = motionTime;
+
+    // Smooth local deformation prevents the high-frequency detail from being
+    // represented by one scene-wide motion vector. All components are periodic
+    // over the 16-second CPU time wrap, so the loop has no discontinuity.
+    const float2 warpPx = float2(
+        7.0 * sin(twoPi * (uv.y * 3.0 + t * 0.50)) +
+        4.0 * sin(twoPi * (uv.x * 2.0 - t * 0.75)),
+        6.0 * sin(twoPi * (uv.x * 2.5 - t * 0.50)) +
+        3.0 * sin(twoPi * (uv.y * 4.0 + t * 0.25)));
+    const float2 p = input.position.xy + warpPx;
+
+    // A clean, deterministic technical weave replaces random grain. Three
+    // independently moving line families plus two smooth micro-lattices create
+    // persistent residual detail for the encoder while remaining visually
+    // trackable and stable from frame to frame.
+    const float lineA = AntiAliasedLine((p.x + p.y * 0.71) / 5.0 + t * 41.0);
+    const float lineB = AntiAliasedLine((p.x * 0.83 - p.y) / 6.0 - t * 47.0);
+    const float lineC = AntiAliasedLine((p.x * 0.29 + p.y) / 8.0 + t * 29.0);
+
+    const float microA =
+        sin(twoPi * (p.x / 7.0 + t * 31.0)) *
+        sin(twoPi * (p.y / 9.0 - t * 37.0));
+    const float microB =
+        sin(twoPi * ((p.x + p.y) / 11.0 - t * 23.0)) *
+        sin(twoPi * ((p.x - p.y) / 13.0 + t * 19.0));
+
+    // The large wall moves right at half a screen per second as before. It gives
+    // the eye obvious landmarks for hitch detection while the fine layers stress
+    // compression. The eight-screen repeat matches scrollOffset exactly.
     const float2 wall = float2(frac((uv.x - scrollOffset) / 8.0) * 48.0,
                                uv.y * 5.0);
-    const uint2 tile = uint2(floor(wall));
+    const float2 tile = floor(wall);
     const float2 local = frac(wall);
     const float2 pixel = float2(6.0 / width, 5.0 / height);
-    const uint tileSeed = tile.x * 73856093U ^ tile.y * 19349663U;
-    float3 rgb = 0.16 + 0.24 * RandomRGB(tileSeed);
 
-    // Smooth surface detail travels with the tiles, rather than sparkling
-    // when a subpixel scrolling position crosses an integer coordinate.
-    rgb += 0.035 * sin((wall.x * 9.0 + wall.y * 13.0) * 6.2831853);
+    const float palette =
+        tile.x * 0.754877666 + tile.y * 0.569840296;
+    float3 rgb = 0.19 + 0.075 * float3(
+        sin(twoPi * palette),
+        sin(twoPi * palette + 2.0943951),
+        sin(twoPi * palette + 4.1887902));
 
-    // Keep the existing --noise range/endpoints, but bias its middle towards
-    // fine grain: default 50 is about 1.68px instead of 32.5px blocks. Fresh
-    // RGB detail resists motion prediction even when the wall scrolls rigidly.
-    const float coarse = 1.0 - noiseStrength;
-    const float blockSize = exp2(6.0 * coarse * coarse * coarse);
-    const uint2 block = uint2(input.position.xy / blockSize);
-    const uint spatial = block.x * 73856093U ^ block.y * 19349663U;
-    const uint temporal = frameIndex * 747796405U;
-    rgb += 0.24 * (RandomRGB(spatial ^ temporal) - 0.5);
+    // Structured fine detail: no hashes, no per-frame random values, and no
+    // stochastic grain. The amplitudes are deliberately moderate so the scene
+    // stays readable while presenting many moving edges to the video codec.
+    rgb += 0.060 * float3(lineA, 0.20 * lineA, 0.65 * lineA);
+    rgb += 0.055 * float3(0.25 * lineB, lineB, 0.55 * lineB);
+    rgb += 0.045 * float3(0.65 * lineC, 0.35 * lineC, lineC);
+    rgb += 0.045 * float3(microA, -0.45 * microA, 0.30 * microA);
+    rgb += 0.035 * float3(-0.30 * microB, 0.55 * microB, microB);
 
-    // Draw landmarks after the grain to leave clean, trackable edges. These
-    // analytic ramps cover about one pixel and do not quantize the movement.
+    // Broad moving luminance bands expose cadence errors without adding another
+    // discrete object layer. They also keep large regions from sharing identical
+    // prediction residuals.
+    const float broad =
+        0.5 + 0.5 * sin(twoPi * (uv.x * 3.0 + uv.y * 2.0 + t * 0.75));
+    rgb += (broad - 0.5) * 0.055;
+
+    // Draw strong landmarks last so the image remains easy to track visually.
     const float2 edgeDistance = min(local, 1.0 - local) / pixel;
     const float grout = 1.0 - smoothstep(1.0, 2.0,
                                         min(edgeDistance.x, edgeDistance.y));
-    rgb = lerp(rgb, float3(0.07, 0.07, 0.07), grout);
+    rgb = lerp(rgb, float3(0.055, 0.060, 0.070), grout);
 
-    // Vary the upright positions/widths to avoid an identical stripe train.
-    const float columnRandom = Random01(tile.x * 747796405U);
-    const float uprightDistance = abs(local.x - (0.16 + 0.12 * columnRandom));
-    const float upright = 1.0 - smoothstep(0.018 + 0.018 * columnRandom,
-        0.018 + 0.018 * columnRandom + pixel.x, uprightDistance);
-    rgb = lerp(rgb, float3(0.78, 0.83, 0.88), upright);
+    const float uprightCenter =
+        0.19 + 0.06 * sin(tile.x * 1.6180339 + tile.y * 0.73);
+    const float uprightWidth =
+        0.018 + 0.010 * (0.5 + 0.5 * sin(tile.x * 2.17));
+    const float uprightDistance = abs(local.x - uprightCenter);
+    const float upright = 1.0 - smoothstep(
+        uprightWidth,
+        uprightWidth + pixel.x,
+        uprightDistance);
+    rgb = lerp(rgb, float3(0.80, 0.86, 0.92), upright);
 
     const float diamondDistance = abs(local.x - 0.65) + abs(local.y - 0.5);
-    const float diamond = 1.0 - smoothstep(0.015, 0.015 + pixel.x + pixel.y,
-                                         abs(diamondDistance - 0.17));
-    rgb = lerp(rgb, float3(0.90, 0.68, 0.30), diamond);
+    const float diamond = 1.0 - smoothstep(
+        0.015,
+        0.015 + pixel.x + pixel.y,
+        abs(diamondDistance - 0.17));
+    rgb = lerp(rgb, float3(0.92, 0.69, 0.28), diamond);
 
-    return float4(rgb, 1.0);
+    const float2 ringPos = local - float2(0.42, 0.50);
+    const float ringDistance = length(ringPos);
+    const float ring = 1.0 - smoothstep(
+        0.010,
+        0.010 + pixel.x + pixel.y,
+        abs(ringDistance - 0.115));
+    rgb = lerp(rgb, float3(0.30, 0.83, 0.93), ring);
+
+    return float4(saturate(rgb), 1.0);
 }
 )HLSL";
 
@@ -197,7 +233,6 @@ void PrintUsage()
         << L"Options:\n"
         << L"  --fps <value>              Render cadence, default 117\n"
         << L"  --controller-index <0-3>   XInput controller index, default 0\n"
-        << L"  --noise <0-100>            Grain spatial frequency: 100=1px, 0=64px blocks; default 50 (~1.68px)\n"
         << L"  --marker-size <pixels>     Center square size, default 32\n"
         << L"  --help                     Show this help\n\n"
         << L"A or Space toggles BLACK <-> WHITE. B or Esc exits.\n";
@@ -239,17 +274,6 @@ bool ParseOptions(int argc, wchar_t** argv, Options& options)
                 return false;
             }
             options.controllerIndex = static_cast<DWORD>(parsed);
-            continue;
-        }
-        if (arg == L"--noise") {
-            const wchar_t* value = requireValue(L"--noise");
-            if (!value) return false;
-            const double parsed = std::wcstod(value, nullptr);
-            if (!(parsed >= 0.0 && parsed <= 100.0)) {
-                std::wcerr << L"--noise must be between 0 and 100\n";
-                return false;
-            }
-            options.noise = static_cast<float>(parsed / 100.0);
             continue;
         }
         if (arg == L"--marker-size") {
@@ -737,7 +761,7 @@ int wmain(int argc, wchar_t** argv)
         << L"Render cadence: " << options.fps << L" FPS\n"
         << L"XInput controller: " << options.controllerIndex << L"\n"
         << L"Center marker: " << options.markerSize << L" px, starts BLACK\n"
-        << L"Background: scrolling textured tiles, landmarks and dynamic grain\n"
+        << L"Background: structured moving technical pattern, no random noise\n"
         << L"Tearing present: " << (allowTearing ? L"yes" : L"no") << L"\n"
         << L"A/Space toggle marker. B/Esc exit.\n";
 
@@ -812,7 +836,6 @@ int wmain(int argc, wchar_t** argv)
         ShaderParams params {};
         params.frameIndex = frameIndex++;
         params.markerWhite = markerWhite;
-        params.noiseStrength = options.noise;
         params.markerHalfSize = options.markerSize * 0.5f;
         params.width = static_cast<float>(width);
         params.height = static_cast<float>(height);
@@ -825,6 +848,7 @@ int wmain(int argc, wchar_t** argv)
         const double elapsed = static_cast<double>(motionNow.QuadPart - motionStart.QuadPart) /
                                static_cast<double>(motionFrequency.QuadPart);
         params.scrollOffset = static_cast<float>(std::fmod(elapsed * 0.5, 8.0));
+        params.motionTime = static_cast<float>(std::fmod(elapsed, 16.0));
         context->UpdateSubresource(constantBuffer.Get(), 0, nullptr, &params, 0, 0);
 
         context->Draw(3, 0);

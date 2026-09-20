@@ -2,7 +2,7 @@ name: Build Windows helper
 
 on:
   push:
-    branches: [main, sunshine-benchmark-integration]
+    branches: [main, sunshine-benchmark-integration, structured-bandwidth-pattern]
   pull_request:
   workflow_dispatch:
 
