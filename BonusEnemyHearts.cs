@@ -3,7 +3,7 @@ using System.Globalization;
 using BepInEx;
 using UnityEngine;
 
-[BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.1")]
+[BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.2")]
 public sealed class BonusEnemyHearts : BaseUnityPlugin
 {
     private static readonly Random Roll = new Random();
@@ -12,12 +12,16 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
     private static bool dropsEnabled = true;
     private bool commandsRegistered;
     private static bool reportedSpawnError;
+    private static int trackedEnemies;
+    private static int enemyDeaths;
+    private static int spawnAttempts;
+    private static int bonusHeartsSpawned;
     private static BonusEnemyHearts instance;
 
     private void Awake()
     {
         instance = this;
-        Logger.LogInfo("Bonus Enemy Hearts v1.0.1 Awake: subscribing to enemy start hook.");
+        Logger.LogInfo("Bonus Enemy Hearts v1.0.2 Awake: subscribing to enemy start hook.");
         ETGMod.AIActor.OnPostStart += RegisterEnemy;
     }
     private void Start() { RegisterCommandsIfReady(); }
@@ -34,7 +38,10 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
         if (ETGModConsole.Commands == null) return;
         try
         {
-            var group = ETGModConsole.Commands.AddGroup("heartdrop", args => Status());
+            ETGModConsole.Commands.AddGroup("heartdrop", args => Status());
+            // IMPORTANT: AddGroup returns the PARENT, not the new subgroup.
+            var group = ETGModConsole.Commands.GetGroup("heartdrop");
+            if (group == null) throw new InvalidOperationException("heartdrop subgroup not found after AddGroup");
             group.AddUnit("half", args => SetChance(args, true));
             group.AddUnit("full", args => SetChance(args, false));
             group.AddUnit("on", args => { dropsEnabled = true; Status(); });
@@ -54,26 +61,44 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
     {
         if (enemy == null || enemy.healthHaver == null) return;
         if (enemy.IsHarmlessEnemy || enemy.CompanionOwner != null) return;
+        trackedEnemies++;
         enemy.healthHaver.OnDeath += direction => EnemyDied(enemy);
     }
     private static void EnemyDied(AIActor enemy)
     {
-        if (!dropsEnabled || enemy == null) return;
+        if (enemy == null) return;
+        enemyDeaths++;
+        if (!dropsEnabled) return;
         double chance = Roll.NextDouble() * 100.0;
         int pickupId = chance < fullChance ? 85 :
                        chance < fullChance + halfChance ? 73 : -1;
         if (pickupId < 0) return;
+        spawnAttempts++;
         try
         {
             var pickup = PickupObjectDatabase.GetById(pickupId);
-            if (pickup == null) return;
+            if (pickup == null)
+            {
+                if (!reportedSpawnError && instance != null)
+                {
+                    reportedSpawnError = true;
+                    instance.Logger.LogWarning("Heart pickup ID " + pickupId + " was not found.");
+                }
+                return;
+            }
             Vector2 pos = enemy.CenterPosition;
             LootEngine.SpawnItem(pickup.gameObject,
                 new Vector3(pos.x, pos.y, 0f), Vector2.zero, 0f,
                 false, true, false);
+            bonusHeartsSpawned++;
         }
-        catch (Exception)
+        catch (Exception e)
         {
+            if (!reportedSpawnError && instance != null)
+            {
+                reportedSpawnError = true;
+                instance.Logger.LogError("Bonus heart spawn failed: " + e);
+            }
         }
     }
     private static void SetChance(string[] args, bool half)
@@ -98,6 +123,8 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
     {
         ETGModConsole.Log("[Bonus Enemy Hearts] " + (dropsEnabled ? "ON" : "OFF") +
             " | half=" + halfChance.ToString(CultureInfo.InvariantCulture) +
-            "% | full=" + fullChance.ToString(CultureInfo.InvariantCulture) + "%", false);
+            "% | full=" + fullChance.ToString(CultureInfo.InvariantCulture) +
+            "% | tracked=" + trackedEnemies + " | kills=" + enemyDeaths +
+            " | spawn_attempts=" + spawnAttempts + " | spawned=" + bonusHeartsSpawned, false);
     }
 }
