@@ -1,153 +1,194 @@
 using System;
-using System.Globalization;
 using System.Collections.Generic;
-using Dungeonator;
+using System.Globalization;
+using System.Reflection;
 using BepInEx;
 using UnityEngine;
 
-[BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.3")]
+[BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.4")]
 public sealed class BonusEnemyHearts : BaseUnityPlugin
 {
-    private static readonly Random Roll = new Random();
-    private const int HalfHeartPickupId = 73;
-    private const int FullHeartPickupId = 85;
-    private const float ScanIntervalSeconds = 0.10f;
-    private static readonly HashSet<AIActor> SubscribedEnemies = new HashSet<AIActor>();
-    private static int scanCount;
-    private static int scannedEnemies;
-    private static string lastError = "none";
-    private float nextScanTime;
-    private bool scanErrorLogged;
-    private bool spawnErrorLogged;
+    // Does not modify vanilla reward tables or the game's random generator.
+    private const string PluginGuid = "local.bonusenemyhearts";
+    private const int HalfHeartId = 73;
+    private const int FullHeartId = 85;
+    private static readonly System.Random Roll = new System.Random();
+    private static readonly HashSet<int> ProcessedHealthIds = new HashSet<int>();
+
+    private struct PendingDrop
+    {
+        public int ItemId;
+        public Vector2 Position;
+    }
+
+    private static BonusEnemyHearts instance;
     private static float halfChance = 10f;
     private static float fullChance = 2f;
     private static bool dropsEnabled = true;
     private bool commandsRegistered;
-    private static int trackedEnemies;
-    private static int enemyDeaths;
+    private bool hookActive;
+    private object harmonyInstance;
+    private static bool spawnErrorLogged;
+    private static int allDeaths;
+    private static int eligibleDeaths;
+    private static int duplicateDeaths;
     private static int spawnAttempts;
     private static int bonusHeartsSpawned;
-    private static BonusEnemyHearts instance;
+    private static string lastError = "none";
 
     private void Awake()
     {
         instance = this;
-        Logger.LogInfo("Bonus Enemy Hearts v1.0.3 loaded; scanning room enemies rather than depending on MtG OnPostStart.");
+        try
+        {
+            InstallGlobalDeathHook();
+            hookActive = true;
+            Logger.LogInfo("Bonus Enemy Hearts v1.0.4: Harmony hook installed on HealthHaver.Die(Vector2).");
+        }
+        catch (Exception e)
+        {
+            hookActive = false;
+            lastError = "hook: " + e.GetType().Name + " " + e.Message;
+            Logger.LogError("Global enemy death hook could not be installed: " + e);
+        }
     }
+
     private void Start() { RegisterCommandsIfReady(); }
+
     private void Update()
     {
         if (!commandsRegistered) RegisterCommandsIfReady();
-        if (Time.realtimeSinceStartup < nextScanTime) return;
-        nextScanTime = Time.realtimeSinceStartup + ScanIntervalSeconds;
-        ScanCurrentRoom();
     }
+
     private void OnDestroy()
     {
+        // Only unpatch this plugin; never unpatch Harmony patches installed by other mods.
+        if (harmonyInstance != null)
+        {
+            try
+            {
+                MethodInfo unpatch = harmonyInstance.GetType().GetMethod("UnpatchSelf", BindingFlags.Public | BindingFlags.Instance);
+                if (unpatch != null) unpatch.Invoke(harmonyInstance, null);
+            }
+            catch (Exception e) { Logger.LogWarning("Harmony cleanup failed: " + e.Message); }
+        }
+        hookActive = false;
         instance = null;
-        SubscribedEnemies.Clear();
+        ProcessedHealthIds.Clear();
     }
-    private void RegisterCommandsIfReady()
+
+    private void InstallGlobalDeathHook()
     {
-        if (ETGModConsole.Commands == null) return;
+        // BepInEx 5 ships 0Harmony. Resolve it at runtime to avoid depending on
+        // one exact HarmonyX assembly version from the user's installation.
+        Type harmonyType = Type.GetType("HarmonyLib.Harmony, 0Harmony", false);
+        Type harmonyMethodType = Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", false);
+        if (harmonyType == null || harmonyMethodType == null)
+            throw new InvalidOperationException("BepInEx HarmonyX (0Harmony) was not found");
+
+        MethodInfo die = typeof(HealthHaver).GetMethod("Die",
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+            null, new Type[] { typeof(Vector2) }, null);
+        if (die == null) throw new MissingMethodException("HealthHaver.Die(Vector2)");
+
+        MethodInfo prefix = typeof(BonusEnemyHearts).GetMethod("DeathPrefix",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        MethodInfo postfix = typeof(BonusEnemyHearts).GetMethod("DeathPostfix",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        if (prefix == null || postfix == null)
+            throw new MissingMethodException("Internal death patch methods not found");
+
+        harmonyInstance = Activator.CreateInstance(harmonyType, new object[] { PluginGuid });
+        object prefixMethod = Activator.CreateInstance(harmonyMethodType, new object[] { prefix });
+        object postfixMethod = Activator.CreateInstance(harmonyMethodType, new object[] { postfix });
+
+        MethodInfo patch = null;
+        foreach (MethodInfo candidate in harmonyType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (candidate.Name != "Patch") continue;
+            ParameterInfo[] p = candidate.GetParameters();
+            if (p.Length < 3 || p[0].ParameterType != typeof(MethodBase) ||
+                p[1].ParameterType != harmonyMethodType || p[2].ParameterType != harmonyMethodType)
+                continue;
+            patch = candidate;
+            break;
+        }
+        if (patch == null) throw new MissingMethodException("Harmony.Patch(MethodBase, HarmonyMethod, HarmonyMethod...)");
+        ParameterInfo[] parameters = patch.GetParameters();
+        object[] patchArgs = new object[parameters.Length];
+        patchArgs[0] = die;
+        patchArgs[1] = prefixMethod;
+        patchArgs[2] = postfixMethod;
+        // Other HarmonyMethod parameters (transpiler, finalizer, etc.) remain null.
+        patch.Invoke(harmonyInstance, patchArgs);
+    }
+
+    // Harmony invokes these for EVERY HealthHaver.Die, including bosses.
+    // Prefix captures the living enemy position; postfix spawns the pickup
+    // after the original Die implementation, without altering it.
+    private static void DeathPrefix(HealthHaver __instance, out PendingDrop __state)
+    {
+        __state = new PendingDrop { ItemId = -1 };
+        allDeaths++;
         try
         {
-            ETGModConsole.Commands.AddGroup("heartdrop", args => Status());
-            // IMPORTANT: AddGroup returns the PARENT, not the new subgroup.
-            var group = ETGModConsole.Commands.GetGroup("heartdrop");
-            if (group == null) throw new InvalidOperationException("heartdrop subgroup not found after AddGroup");
-            group.AddUnit("half", args => SetChance(args, true));
-            group.AddUnit("full", args => SetChance(args, false));
-            group.AddUnit("on", args => { dropsEnabled = true; Status(); });
-            group.AddUnit("off", args => { dropsEnabled = false; Status(); });
-            group.AddUnit("status", args => Status());
-            group.AddUnit("scan", args => { ScanCurrentRoom(); Status(); });
-            group.AddUnit("test", args => SpawnTestHeart());
-            commandsRegistered = true;
-            Logger.LogInfo("Registered heartdrop commands.");
-            ETGModConsole.Log("[Bonus Enemy Hearts] Loaded. Try: heartdrop status", false);
-        }
-        catch (Exception e)
-        {
-            Logger.LogWarning("Couldn't register heartdrop commands: " + e);
-            commandsRegistered = true;
-        }
-    }
-    private static void ScanCurrentRoom()
-    {
-        scanCount++;
-        try
-        {
-            if (GameManager.Instance == null) return;
-            PlayerController player = GameManager.Instance.PrimaryPlayer;
-            if (player == null || player.CurrentRoom == null) return;
-            // Room enemy enumeration works even when MtG's OnPostStart is never dispatched.
-            List<AIActor> enemies = player.CurrentRoom.GetActiveEnemies((ActiveEnemyType)1);
-            if (enemies == null) return;
-            scannedEnemies += enemies.Count;
-            for (int i = 0; i < enemies.Count; i++)
+            if (__instance == null) return;
+            AIActor enemy = __instance.aiActor;
+            if (enemy == null || enemy.IsHarmlessEnemy || enemy.CompanionOwner != null) return;
+            if (!ProcessedHealthIds.Add(__instance.GetInstanceID()))
             {
-                AIActor enemy = enemies[i];
-                if (enemy == null || enemy.IsHarmlessEnemy || enemy.CompanionOwner != null) continue;
-                HealthHaver health = enemy.healthHaver;
-                if (health == null || health.IsDead || SubscribedEnemies.Contains(enemy)) continue;
-                SubscribedEnemies.Add(enemy);
-                health.OnPreDeath += direction => EnemyDied(enemy);
-                trackedEnemies++;
+                duplicateDeaths++;
+                return;
             }
+            eligibleDeaths++;
+            if (!dropsEnabled) return;
+
+            double chance = Roll.NextDouble() * 100.0;
+            int pickup = chance < fullChance ? FullHeartId :
+                chance < fullChance + halfChance ? HalfHeartId : -1;
+            if (pickup < 0) return;
+            __state.ItemId = pickup;
+            __state.Position = enemy.CenterPosition;
         }
-        catch (Exception e)
-        {
-            lastError = "scan: " + e.GetType().Name + " " + e.Message;
-            if (instance != null && !instance.scanErrorLogged)
-            {
-                instance.scanErrorLogged = true;
-                instance.Logger.LogError("Enemy scan failed: " + e);
-            }
-        }
-    }
-    private static void EnemyDied(AIActor enemy)
-    {
-        enemyDeaths++;
-        if (!dropsEnabled || enemy == null) return;
-        double chance = Roll.NextDouble() * 100.0;
-        int pickupId = chance < fullChance ? FullHeartPickupId :
-                       chance < fullChance + halfChance ? HalfHeartPickupId : -1;
-        if (pickupId < 0) return;
-        try { SpawnPickup(pickupId, enemy.CenterPosition); }
         catch (Exception e)
         {
             lastError = "death: " + e.GetType().Name + " " + e.Message;
-            if (instance != null && !instance.spawnErrorLogged)
-            {
-                instance.spawnErrorLogged = true;
-                instance.Logger.LogError("Failed reading dead enemy position: " + e);
-            }
+            if (instance != null) instance.Logger.LogError("Death hook error: " + e);
         }
     }
+
+    private static void DeathPostfix(PendingDrop __state)
+    {
+        if (__state.ItemId >= 0)
+            SpawnPickup(__state.ItemId, __state.Position);
+    }
+
     private static void SpawnPickup(int pickupId, Vector2 position)
     {
         spawnAttempts++;
         try
         {
             PickupObject pickup = PickupObjectDatabase.GetById(pickupId);
-            if (pickup == null) throw new InvalidOperationException("Heart pickup ID " + pickupId + " not found");
+            if (pickup == null)
+                throw new InvalidOperationException("Heart pickup ID " + pickupId + " not found");
             DebrisObject spawned = LootEngine.SpawnItem(pickup.gameObject,
                 new Vector3(position.x, position.y, 0f), Vector2.zero, 0f,
                 false, true, false);
-            if (spawned == null) throw new InvalidOperationException("LootEngine.SpawnItem returned null for " + pickupId);
+            if (spawned == null)
+                throw new InvalidOperationException("LootEngine.SpawnItem returned null for " + pickupId);
             bonusHeartsSpawned++;
         }
         catch (Exception e)
         {
             lastError = "spawn: " + e.GetType().Name + " " + e.Message;
-            if (instance != null && !instance.spawnErrorLogged)
+            if (instance != null && !spawnErrorLogged)
             {
-                instance.spawnErrorLogged = true;
+                spawnErrorLogged = true;
                 instance.Logger.LogError("Bonus heart spawn failed: " + e);
             }
         }
     }
+
     private static void SpawnTestHeart()
     {
         try
@@ -157,16 +198,42 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
                 ETGModConsole.Log("[Bonus Enemy Hearts] Enter a dungeon room first.", false);
                 return;
             }
-            SpawnPickup(HalfHeartPickupId, GameManager.Instance.PrimaryPlayer.CenterPosition);
-            Status();
+            SpawnPickup(HalfHeartId, GameManager.Instance.PrimaryPlayer.CenterPosition);
         }
         catch (Exception e)
         {
             lastError = "test: " + e.GetType().Name + " " + e.Message;
-            if (instance != null) instance.Logger.LogError("Test heart spawn failed: " + e);
-            Status();
+            if (instance != null) instance.Logger.LogError("Heart test failed: " + e);
+        }
+        Status();
+    }
+
+    private void RegisterCommandsIfReady()
+    {
+        if (ETGModConsole.Commands == null) return;
+        try
+        {
+            ETGModConsole.Commands.AddGroup("heartdrop", args => Status());
+            var group = ETGModConsole.Commands.GetGroup("heartdrop");
+            if (group == null)
+                throw new InvalidOperationException("heartdrop command group was not found");
+            group.AddUnit("half", args => SetChance(args, true));
+            group.AddUnit("full", args => SetChance(args, false));
+            group.AddUnit("on", args => { dropsEnabled = true; Status(); });
+            group.AddUnit("off", args => { dropsEnabled = false; Status(); });
+            group.AddUnit("status", args => Status());
+            group.AddUnit("test", args => SpawnTestHeart());
+            commandsRegistered = true;
+            Logger.LogInfo("Registered heartdrop console commands.");
+            ETGModConsole.Log("[Bonus Enemy Hearts] v1.0.4 loaded; use: heartdrop status", false);
+        }
+        catch (Exception e)
+        {
+            commandsRegistered = true;
+            Logger.LogError("Couldn't register heartdrop commands: " + e);
         }
     }
+
     private static void SetChance(string[] args, bool half)
     {
         float value;
@@ -179,19 +246,22 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
         }
         if (value + (half ? fullChance : halfChance) > 100f)
         {
-            ETGModConsole.Log("Combined chances cannot exceed 100%.", false);
+            ETGModConsole.Log("Combined heart chances cannot exceed 100%.", false);
             return;
         }
         if (half) halfChance = value; else fullChance = value;
         Status();
     }
+
     private static void Status()
     {
+        string hook = instance != null && instance.hookActive ? "ACTIVE" : "INACTIVE";
         ETGModConsole.Log("[Bonus Enemy Hearts] " + (dropsEnabled ? "ON" : "OFF") +
+            " | hook=" + hook +
             " | half=" + halfChance.ToString(CultureInfo.InvariantCulture) +
             "% | full=" + fullChance.ToString(CultureInfo.InvariantCulture) +
-            "% | scans=" + scanCount + " | seen=" + scannedEnemies +
-            " | tracked=" + trackedEnemies + " | kills=" + enemyDeaths +
+            "% | deaths=" + allDeaths + " | eligible=" + eligibleDeaths +
+            " | duplicates=" + duplicateDeaths +
             " | spawn_attempts=" + spawnAttempts + " | spawned=" + bonusHeartsSpawned +
             " | error=" + lastError, false);
     }
