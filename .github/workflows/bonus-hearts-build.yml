@@ -21,9 +21,9 @@ jobs:
         run: |
           mcs -sdk:2 -out:build/HeartDropCommandSmokeTest.exe -r:build/out/BonusEnemyHearts.dll -r:build/stubs/ModTheGungeonAPI.dll -r:build/stubs/BepInEx.dll -r:build/stubs/Assembly-CSharp.dll -r:build/stubs/UnityEngine.CoreModule.dll HeartDropCommandSmokeTest.cs
           MONO_PATH=build/stubs:build/out mono build/HeartDropCommandSmokeTest.exe
-      - name: Verify room scanning and 100 percent heart spawn
+      - name: Verify Harmony death hook and 100 percent heart spawn
         run: |
-          mcs -sdk:2 -out:build/HeartDropFunctionalTest.exe -r:build/out/BonusEnemyHearts.dll -r:build/stubs/ModTheGungeonAPI.dll -r:build/stubs/BepInEx.dll -r:build/stubs/Assembly-CSharp.dll -r:build/stubs/UnityEngine.CoreModule.dll HeartDropFunctionalTest.cs
+          mcs -sdk:2 -out:build/HeartDropFunctionalTest.exe -r:build/out/BonusEnemyHearts.dll -r:build/stubs/ModTheGungeonAPI.dll -r:build/stubs/BepInEx.dll -r:build/stubs/Assembly-CSharp.dll -r:build/stubs/UnityEngine.CoreModule.dll -r:build/stubs/0Harmony.dll HeartDropFunctionalTest.cs
           MONO_PATH=build/stubs:build/out mono build/HeartDropFunctionalTest.exe
       - name: Package
         run: |
