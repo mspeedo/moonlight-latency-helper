@@ -3,8 +3,7 @@ using System.Globalization;
 using BepInEx;
 using UnityEngine;
 
-[BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.0")]
-[BepInDependency("etgmodding.etg.mtgapi")]
+[BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.1")]
 public sealed class BonusEnemyHearts : BaseUnityPlugin
 {
     private static readonly Random Roll = new Random();
@@ -12,9 +11,13 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
     private static float fullChance = 2f;
     private static bool dropsEnabled = true;
     private bool commandsRegistered;
+    private static bool reportedSpawnError;
+    private static BonusEnemyHearts instance;
 
     private void Awake()
     {
+        instance = this;
+        Logger.LogInfo("Bonus Enemy Hearts v1.0.1 Awake: subscribing to enemy start hook.");
         ETGMod.AIActor.OnPostStart += RegisterEnemy;
     }
     private void Start() { RegisterCommandsIfReady(); }
@@ -38,6 +41,7 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
             group.AddUnit("off", args => { dropsEnabled = false; Status(); });
             group.AddUnit("status", args => Status());
             commandsRegistered = true;
+            Logger.LogInfo("Registered heartdrop commands.");
             ETGModConsole.Log("[Bonus Enemy Hearts] Loaded. Try: heartdrop status", false);
         }
         catch (Exception e)
