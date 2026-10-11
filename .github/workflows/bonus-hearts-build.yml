@@ -11,9 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install C# compiler
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq mono-mcs
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mono-devel mono-utils
       - name: Compile
-        run: bash ./build.sh
+        run: |
+          test -f /usr/lib/mono/2.0-api/mscorlib.dll
+          bash ./build.sh
+          monodis --assemblyref build/out/BonusEnemyHearts.dll
       - name: Package
         run: |
           mkdir -p deliver/BonusEnemyHearts
