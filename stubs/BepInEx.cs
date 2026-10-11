@@ -5,4 +5,4 @@ namespace BepInEx {
  [AttributeUsage(AttributeTargets.Class)] public sealed class BepInDependency : Attribute{public BepInDependency(string guid){}}
  public class BaseUnityPlugin : MonoBehaviour{public BepInEx.Logging.ManualLogSource Logger{get{return null;}}}
 }
-namespace BepInEx.Logging { public class ManualLogSource {public void LogWarning(object obj){} } }
+namespace BepInEx.Logging { public class ManualLogSource {public void LogWarning(object obj){} public void LogInfo(object obj){} public void LogError(object obj){} } }
