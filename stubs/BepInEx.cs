@@ -3,6 +3,6 @@ using System;using System.Reflection;using UnityEngine;
 namespace BepInEx {
  [AttributeUsage(AttributeTargets.Class)] public sealed class BepInPlugin : Attribute{public BepInPlugin(string guid,string name,string version){}}
  [AttributeUsage(AttributeTargets.Class)] public sealed class BepInDependency : Attribute{public BepInDependency(string guid){}}
- public class BaseUnityPlugin : MonoBehaviour{public BepInEx.Logging.ManualLogSource Logger{get{return null;}}}
+ public class BaseUnityPlugin : MonoBehaviour{public BepInEx.Logging.ManualLogSource Logger{get{return new BepInEx.Logging.ManualLogSource();}}}
 }
 namespace BepInEx.Logging { public class ManualLogSource {public void LogWarning(object obj){} public void LogInfo(object obj){} public void LogError(object obj){} } }
