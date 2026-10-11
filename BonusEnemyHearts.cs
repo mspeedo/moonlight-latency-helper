@@ -4,6 +4,7 @@ using BepInEx;
 using UnityEngine;
 
 [BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.0")]
+[BepInDependency("etgmodding.etg.mtgapi")]
 public sealed class BonusEnemyHearts : BaseUnityPlugin
 {
     private static readonly Random Roll = new Random();
