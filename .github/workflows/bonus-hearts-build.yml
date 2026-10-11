@@ -1,0 +1,26 @@
+name: Build Bonus Enemy Hearts (temporary)
+on:
+  push:
+    branches: [tmp-bonus-enemy-hearts-build-20261011]
+  pull_request:
+    branches: [main]
+    paths: ["BonusEnemyHearts.cs", "build.sh", "stubs/**", ".github/workflows/bonus-hearts-build.yml"]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install C# compiler
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mono-mcs
+      - name: Compile
+        run: bash ./build.sh
+      - name: Package
+        run: |
+          mkdir -p deliver/BonusEnemyHearts
+          cp build/out/BonusEnemyHearts.dll deliver/BonusEnemyHearts/
+          cp BonusEnemyHearts-README.md deliver/BonusEnemyHearts/README.md
+          cd deliver && zip -r ../BonusEnemyHearts-BepInEx.zip BonusEnemyHearts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BonusEnemyHearts-BepInEx
+          path: BonusEnemyHearts-BepInEx.zip
