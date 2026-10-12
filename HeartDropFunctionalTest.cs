@@ -45,6 +45,10 @@ public static class HeartDropFunctionalTest
             var enemy = new AIActor { CenterPosition = new Vector2 {x=1,y=2} };
             var enemyHealth = new HealthHaver { aiActor=enemy };
             SimulateDeath(enemyHealth);
+            Assert(ETGModConsole.LastLog.Contains("Bonus drop: half-heart"),
+                "Automatic half-heart message was not printed");
+            Assert(ETGModConsole.LastLog.Contains("total=1 (half=1, full=0)"),
+                "Half-heart breakdown missing from message");
             commands.Invoke("status");
             Assert(ETGModConsole.LastLog.Contains("deaths=1"),"Death hook not counted");
             Assert(ETGModConsole.LastLog.Contains("eligible=1"),"Enemy not eligible");
@@ -63,15 +67,32 @@ public static class HeartDropFunctionalTest
             SimulateDeath(new HealthHaver {aiActor=new AIActor { IsHarmlessEnemy=true }});
             Assert(LootEngine.SpawnCounter == 1,"Harmless enemy got bonus drop");
 
+            commands.Invoke("log","off");
+            Assert(ETGModConsole.LastLog.Contains("log=OFF"),"Log-off status missing");
+            string quietStatus = ETGModConsole.LastLog;
+            SimulateDeath(new HealthHaver {aiActor=new AIActor()});
+            Assert(LootEngine.SpawnCounter==2,"Log-off must not disable heart drops");
+            Assert(ETGModConsole.LastLog==quietStatus,"Log-off still emitted an automatic message");
+
+            commands.Invoke("log","on");
+            Assert(ETGModConsole.LastLog.Contains("log=ON"),"Log-on status missing");
+            commands.Invoke("half","0");
+            commands.Invoke("full","100");
+            SimulateDeath(new HealthHaver {aiActor=new AIActor()});
+            Assert(ETGModConsole.LastLog.Contains("Bonus drop: full heart"),
+                "Automatic full-heart message was not printed");
+            Assert(ETGModConsole.LastLog.Contains("total=3 (half=2, full=1)"),
+                "Full-heart breakdown missing from message");
+
             commands.Invoke("test");
-            Assert(LootEngine.SpawnCounter==2,"Manual test failed");
+            Assert(LootEngine.SpawnCounter==4,"Manual test failed");
 
             commands.Invoke("half","10");
             commands.Invoke("full","2");
             Assert(ETGModConsole.LastLog.Contains("half=10% | full=2%"),"Reset default failed");
             InvokeLifecycle(plugin,"OnDestroy");
             Assert(Harmony.Original == null,"Harmony patch not removed");
-            Console.WriteLine("PASS: global Harmony.Die patch registers, catches enemy deaths, spawns, deduplicates, filters, unloads.");
+            Console.WriteLine("PASS: global Harmony.Die hook; half/full drop notifications; log on/off preserves drops; deduplication; unload.");
             return 0;
         }
         catch (Exception e)
