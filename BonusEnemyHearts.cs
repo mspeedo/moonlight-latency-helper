@@ -5,7 +5,7 @@ using System.Reflection;
 using BepInEx;
 using UnityEngine;
 
-[BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.4")]
+[BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.5")]
 public sealed class BonusEnemyHearts : BaseUnityPlugin
 {
     // Does not modify vanilla reward tables or the game's random generator.
@@ -25,6 +25,7 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
     private static float halfChance = 10f;
     private static float fullChance = 2f;
     private static bool dropsEnabled = true;
+    private static bool dropConsoleMessages = true;
     private bool commandsRegistered;
     private bool hookActive;
     private object harmonyInstance;
@@ -34,6 +35,8 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
     private static int duplicateDeaths;
     private static int spawnAttempts;
     private static int bonusHeartsSpawned;
+    private static int halfHeartsSpawned;
+    private static int fullHeartsSpawned;
     private static string lastError = "none";
 
     private void Awake()
@@ -43,7 +46,7 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
         {
             InstallGlobalDeathHook();
             hookActive = true;
-            Logger.LogInfo("Bonus Enemy Hearts v1.0.4: Harmony hook installed on HealthHaver.Die(Vector2).");
+            Logger.LogInfo("Bonus Enemy Hearts v1.0.5: Harmony hook installed on HealthHaver.Die(Vector2).");
         }
         catch (Exception e)
         {
@@ -177,6 +180,25 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
             if (spawned == null)
                 throw new InvalidOperationException("LootEngine.SpawnItem returned null for " + pickupId);
             bonusHeartsSpawned++;
+            if (pickupId == HalfHeartId) halfHeartsSpawned++;
+            if (pickupId == FullHeartId) fullHeartsSpawned++;
+            // Logging is isolated from the drop itself: console errors must not
+            // interfere with vanilla death handling or bonus pickup spawning.
+            if (dropConsoleMessages)
+            {
+                try
+                {
+                    string kind = pickupId == FullHeartId ? "full heart" : "half-heart";
+                    ETGModConsole.Log("[Bonus Enemy Hearts] Bonus drop: " + kind +
+                        " | total=" + bonusHeartsSpawned +
+                        " (half=" + halfHeartsSpawned + ", full=" + fullHeartsSpawned + ")", false);
+                }
+                catch (Exception logError)
+                {
+                    if (instance != null)
+                        instance.Logger.LogWarning("Bonus heart console notification failed: " + logError.Message);
+                }
+            }
         }
         catch (Exception e)
         {
@@ -223,15 +245,33 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
             group.AddUnit("off", args => { dropsEnabled = false; Status(); });
             group.AddUnit("status", args => Status());
             group.AddUnit("test", args => SpawnTestHeart());
+            group.AddUnit("log", args => SetDropLogging(args));
             commandsRegistered = true;
             Logger.LogInfo("Registered heartdrop console commands.");
-            ETGModConsole.Log("[Bonus Enemy Hearts] v1.0.4 loaded; use: heartdrop status", false);
+            ETGModConsole.Log("[Bonus Enemy Hearts] v1.0.5 loaded; use: heartdrop status", false);
         }
         catch (Exception e)
         {
             commandsRegistered = true;
             Logger.LogError("Couldn't register heartdrop commands: " + e);
         }
+    }
+
+    private static void SetDropLogging(string[] args)
+    {
+        if (args == null || args.Length == 0)
+        {
+            Status();
+            return;
+        }
+        if (args.Length != 1 ||
+            (args[0] != "on" && args[0] != "off"))
+        {
+            ETGModConsole.Log("Usage: heartdrop log on|off", false);
+            return;
+        }
+        dropConsoleMessages = args[0] == "on";
+        Status();
     }
 
     private static void SetChance(string[] args, bool half)
@@ -258,11 +298,13 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
         string hook = instance != null && instance.hookActive ? "ACTIVE" : "INACTIVE";
         ETGModConsole.Log("[Bonus Enemy Hearts] " + (dropsEnabled ? "ON" : "OFF") +
             " | hook=" + hook +
+            " | log=" + (dropConsoleMessages ? "ON" : "OFF") +
             " | half=" + halfChance.ToString(CultureInfo.InvariantCulture) +
             "% | full=" + fullChance.ToString(CultureInfo.InvariantCulture) +
             "% | deaths=" + allDeaths + " | eligible=" + eligibleDeaths +
             " | duplicates=" + duplicateDeaths +
             " | spawn_attempts=" + spawnAttempts + " | spawned=" + bonusHeartsSpawned +
+            " (half=" + halfHeartsSpawned + ", full=" + fullHeartsSpawned + ")" +
             " | error=" + lastError, false);
     }
 }
