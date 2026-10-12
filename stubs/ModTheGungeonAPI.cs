@@ -26,5 +26,6 @@ namespace SGUI {public class SLabel {}}
 public static class ETGModConsole {
  public static ConsoleCommandGroup Commands = new ConsoleCommandGroup();
  public static string LastLog;
- public static SGUI.SLabel Log(object text,bool isError){LastLog=text==null?"":text.ToString();Console.WriteLine(LastLog);return null;}
+ public static int LogCount;
+ public static SGUI.SLabel Log(object text,bool isError){LastLog=text==null?"":text.ToString();LogCount++;Console.WriteLine(LastLog);return null;}
 }
