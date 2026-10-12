@@ -5,7 +5,7 @@ using System.Reflection;
 using BepInEx;
 using UnityEngine;
 
-[BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.5")]
+[BepInPlugin("local.bonusenemyhearts", "Bonus Enemy Hearts", "1.0.6")]
 public sealed class BonusEnemyHearts : BaseUnityPlugin
 {
     // Does not modify vanilla reward tables or the game's random generator.
@@ -46,7 +46,7 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
         {
             InstallGlobalDeathHook();
             hookActive = true;
-            Logger.LogInfo("Bonus Enemy Hearts v1.0.5: Harmony hook installed on HealthHaver.Die(Vector2).");
+            Logger.LogInfo("Bonus Enemy Hearts v1.0.6: Harmony hook installed on HealthHaver.Die(Vector2).");
         }
         catch (Exception e)
         {
@@ -188,10 +188,8 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
             {
                 try
                 {
-                    string kind = pickupId == FullHeartId ? "full heart" : "half-heart";
-                    ETGModConsole.Log("[Bonus Enemy Hearts] Bonus drop: " + kind +
-                        " | total=" + bonusHeartsSpawned +
-                        " (half=" + halfHeartsSpawned + ", full=" + fullHeartsSpawned + ")", false);
+                    // Reuse the EXACT same status formatter as 'heartdrop status'.
+                    Status();
                 }
                 catch (Exception logError)
                 {
@@ -227,7 +225,9 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
             lastError = "test: " + e.GetType().Name + " " + e.Message;
             if (instance != null) instance.Logger.LogError("Heart test failed: " + e);
         }
-        Status();
+        // A successful test drop already prints the status when notifications
+        // are enabled; preserve explicit test feedback when logging is muted.
+        if (!dropConsoleMessages) Status();
     }
 
     private void RegisterCommandsIfReady()
@@ -248,7 +248,7 @@ public sealed class BonusEnemyHearts : BaseUnityPlugin
             group.AddUnit("log", args => SetDropLogging(args));
             commandsRegistered = true;
             Logger.LogInfo("Registered heartdrop console commands.");
-            ETGModConsole.Log("[Bonus Enemy Hearts] v1.0.5 loaded; use: heartdrop status", false);
+            ETGModConsole.Log("[Bonus Enemy Hearts] v1.0.6 loaded; use: heartdrop status", false);
         }
         catch (Exception e)
         {
