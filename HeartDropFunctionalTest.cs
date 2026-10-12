@@ -87,8 +87,8 @@ public static class HeartDropFunctionalTest
             commands.Invoke("test");
             Assert(LootEngine.SpawnCounter==4,"Manual test failed");
 
-            commands.Invoke("half","10");
             commands.Invoke("full","2");
+            commands.Invoke("half","10");
             Assert(ETGModConsole.LastLog.Contains("half=10% | full=2%"),"Reset default failed");
             InvokeLifecycle(plugin,"OnDestroy");
             Assert(Harmony.Original == null,"Harmony patch not removed");
